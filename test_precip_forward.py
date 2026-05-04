@@ -7,6 +7,9 @@ import types
 
 stub = types.ModuleType("database_schema")
 stub.PrecipStrategyTrade = object
+stub.PrecipForecast = object
+stub.PrecipOutcome = object
+stub.PrecipStrategySignal = object
 stub.init_database = lambda: None
 sys.modules["database_schema"] = stub
 
