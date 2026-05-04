@@ -132,10 +132,14 @@ def test_max_two_candidates_even_if_both_sides_cross():
     ]
     fc = {
         "total_forecast": 1.25,
-        "p05": 0.8,   # crosses lower
-        "p95": 1.7,   # crosses upper
+        "p05": 0.8,   # crosses lower (overlap = 1.0 - 0.8 = 0.2)
+        "p95": 1.7,   # crosses upper (overlap = 1.7 - 1.5 = 0.2)
         "settlement_month": datetime.date(2026, 5, 1),
         "units": "inches",
     }
     cands = _select_candidates_from_markets("seattle", fc, markets)
     assert len(cands) == 2  # never more than 2
+    questions = [c.question for c in cands]
+    assert any("1.0 and 1.5" in q for q in questions), "Primary bucket missing"
+    # Equal overlap (0.2 each) → tiebreak picks lower_adj (>= condition)
+    assert any("or below" in q for q in questions), "Lower adjacent expected on equal overlap"
