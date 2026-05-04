@@ -18,6 +18,12 @@ const POSITION_PCT = 0.05;
 const MIN_PAPER_ORDER_USD = 0.5;
 const MIN_EXECUTE_ORDER_USD = 1.0;
 
+// ECMWF ±1°C confidence band converted to Fahrenheit
+const CONFIDENCE_BAND_F = 1.8;
+
+// Maximum YES price to enter on any bucket (including adjacent ones)
+const DUAL_BUCKET_MAX_PRICE = 0.20;
+
 export type TradeMode = "dry-run" | "paper" | "execute";
 
 export interface RunOptions {
@@ -51,6 +57,19 @@ function priceTone(
 
 function shortQuestion(question: string, max = 62): string {
   return question.length > max ? `${question.slice(0, max - 1)}…` : question;
+}
+
+function bandOverlap(
+  rangeMin: number,
+  rangeMax: number,
+  bandMin: number,
+  bandMax: number
+): number {
+  const lo = Math.max(rangeMin, bandMin);
+  const hi = Math.min(rangeMax, bandMax);
+  if (hi <= lo) return 0;
+  const bandWidth = bandMax - bandMin;
+  return bandWidth > 0 ? (hi - lo) / bandWidth : 0;
 }
 
 export async function showPositions(): Promise<void> {
@@ -313,187 +332,187 @@ export async function run(options: RunOptions): Promise<void> {
         continue;
       }
 
-      let matched:
-        | {
-            market: PolymarketMarket;
-            question: string;
-            price: number;
-            range: [number, number];
-          }
-        | null = null;
+      interface ScoredBucket {
+        market: PolymarketMarket;
+        question: string;
+        price: number;
+        range: [number, number];
+        score: number;
+      }
+
+      const bandLow  = forecastTemp - CONFIDENCE_BAND_F;
+      const bandHigh = forecastTemp + CONFIDENCE_BAND_F;
+
+      const scoredBuckets: ScoredBucket[] = [];
 
       for (const market of event.markets ?? []) {
         const question = market.question ?? "";
         const rng = parseTempRange(question);
-        if (rng && rng[0] <= forecastTemp && forecastTemp <= rng[1]) {
-          try {
-            const pricesStr = market.outcomePrices ?? "[0.5,0.5]";
-            const prices = JSON.parse(pricesStr) as number[];
-            const yesPrice = Number(prices[0]);
-            if (!isFinite(yesPrice)) continue;
-            matched = {
-              market,
-              question,
-              price: yesPrice,
-              range: rng
-            };
-          } catch {
-            continue;
-          }
+        if (!rng) continue;
+
+        const rMin = rng[0] === -999 ? bandLow - 10 : rng[0];
+        const rMax = rng[1] ===  999 ? bandHigh + 10 : rng[1];
+
+        const score = bandOverlap(rMin, rMax, bandLow, bandHigh);
+        if (score <= 0) continue;
+
+        try {
+          const pricesStr = market.outcomePrices ?? "[0.5,0.5]";
+          const prices = JSON.parse(pricesStr) as number[];
+          const yesPrice = Number(prices[0]);
+          if (!isFinite(yesPrice)) continue;
+          if (yesPrice > DUAL_BUCKET_MAX_PRICE) continue;
+          scoredBuckets.push({ market, question, price: yesPrice, range: rng, score });
+        } catch {
+          continue;
+        }
+      }
+
+      scoredBuckets.sort((a, b) => b.score - a.score);
+      const topBuckets = scoredBuckets.slice(0, 2);
+
+      if (topBuckets.length === 0) {
+        skip(`No bucket within ±${CONFIDENCE_BAND_F}°F of ${forecastTemp}°F at price ≤ $${DUAL_BUCKET_MAX_PRICE}`);
+        continue;
+      }
+
+      for (const matched of topBuckets) {
+        const price = matched.price;
+        const marketId = matched.market.id;
+        const question = matched.question;
+        const tone = priceTone(price, DUAL_BUCKET_MAX_PRICE, config.exit_threshold);
+        console.log(
+          panel(
+            `Matched Bucket • ${shortQuestion(question, 52)}`,
+            [
+              stat("Forecast temp", `${forecastTemp}°F`, "cyan"),
+              stat("Band", `[${bandLow.toFixed(1)}, ${bandHigh.toFixed(1)}]°F`, "blue"),
+              stat("Overlap score", `${(matched.score * 100).toFixed(0)}%`, "cyan"),
+              stat("YES price", `$${price.toFixed(3)}`, tone),
+              stat("Entry gate", `≤ $${DUAL_BUCKET_MAX_PRICE.toFixed(2)}`, "green"),
+              `${C.DIM("Market odds")}   ${progressBar(price, 1, 26, tone)}`
+            ],
+            tone
+          )
+        );
+
+        // DUAL_BUCKET_MAX_PRICE gate already applied during scoring above.
+
+        if (positions[marketId]) {
+          skip(`Already in this market`);
+          continue;
+        }
+
+        if (tradesExecuted >= config.max_trades_per_run) {
+          skip(`Max trades (${config.max_trades_per_run}) reached`);
           break;
         }
-      }
 
-      if (!matched) {
-        skip(`No bucket found for ${forecastTemp}°F`);
-        continue;
-      }
+        const basePositionSize = Number((balance * POSITION_PCT).toFixed(2));
+        const minOrderUsd =
+          mode === "execute" ? MIN_EXECUTE_ORDER_USD : MIN_PAPER_ORDER_USD;
+        const positionSize = Number(Math.max(basePositionSize, minOrderUsd).toFixed(2));
 
-      const price = matched.price;
-      const marketId = matched.market.id;
-      const question = matched.question;
-      const tone = priceTone(price, config.entry_threshold, config.exit_threshold);
-      console.log(
-        panel(
-          `Matched Bucket • ${shortQuestion(question, 52)}`,
-          [
-            stat("Forecast temp", `${forecastTemp}°F`, "cyan"),
-            stat("YES price", `$${price.toFixed(3)}`, tone),
-            stat("Entry trigger", `< $${config.entry_threshold.toFixed(2)}`, "green"),
-            stat("Exit trigger", `>= $${config.exit_threshold.toFixed(2)}`, "red"),
-            `${C.DIM("Market odds")}   ${progressBar(price, 1, 26, tone)}`
-          ],
-          tone
-        )
-      );
+        if (balance < minOrderUsd) {
+          skip(
+            `Wallet balance $${balance.toFixed(2)} is below the live minimum order size of $${minOrderUsd.toFixed(2)}`
+          );
+          break;
+        }
 
-      if (price >= config.entry_threshold) {
-        skip(
-          `Price $${price.toFixed(
-            3
-          )} above threshold $${config.entry_threshold.toFixed(2)}`
+        const shares = positionSize / price;
+        console.log(
+          panel(
+            `Entry Signal • ${locData.name}`,
+            [
+              stat("Action", `${mode === "execute" ? "BUY YES" : "BUY SETUP"}`, "green"),
+              stat("Price", `$${price.toFixed(3)}`, "green"),
+              stat("Position size", `$${positionSize.toFixed(2)}`, "yellow"),
+              ...(positionSize !== basePositionSize
+                ? [stat("Base 5% size", `$${basePositionSize.toFixed(2)}`, "gray")]
+                : []),
+              stat("Estimated shares", shares.toFixed(1), "blue"),
+              `${C.DIM("Sizing gauge")}  ${progressBar(positionSize, Math.max(balance, 1), 26, "green")}`
+            ],
+            "green"
+          )
         );
-        continue;
-      }
 
-      const basePositionSize = Number((balance * POSITION_PCT).toFixed(2));
-      const minOrderUsd =
-        mode === "execute" ? MIN_EXECUTE_ORDER_USD : MIN_PAPER_ORDER_USD;
-      const positionSize = Number(Math.max(basePositionSize, minOrderUsd).toFixed(2));
-
-      if (balance < minOrderUsd) {
-        skip(
-          `Wallet balance $${balance.toFixed(
-            2
-          )} is below the live minimum order size of $${minOrderUsd.toFixed(2)}`
-        );
-        continue;
-      }
-
-      const shares = positionSize / price;
-      console.log(
-        panel(
-          `Entry Signal • ${locData.name}`,
-          [
-            stat("Action", `${mode === "execute" ? "BUY YES" : "BUY SETUP"}`, "green"),
-            stat("Price", `$${price.toFixed(3)}`, "green"),
-            stat("Position size", `$${positionSize.toFixed(2)}`, "yellow"),
-            ...(positionSize !== basePositionSize
-              ? [stat("Base 5% size", `$${basePositionSize.toFixed(2)}`, "gray")]
-              : []),
-            stat("Estimated shares", shares.toFixed(1), "blue"),
-            `${C.DIM("Sizing gauge")}  ${progressBar(positionSize, Math.max(balance, 1), 26, "green")}`
-          ],
-          "green"
-        )
-      );
-
-      if (positions[marketId]) {
-        skip("Already in this market");
-        continue;
-      }
-
-      if (tradesExecuted >= config.max_trades_per_run) {
-        skip(`Max trades (${config.max_trades_per_run}) reached`);
-        continue;
-      }
-
-      if (positionSize < minOrderUsd) {
-        skip(`Position size $${positionSize.toFixed(2)} too small`);
-        continue;
-      }
-
-      if (mode === "execute") {
-        const tokenId = getYesTokenId(matched.market);
-        if (!tokenId || !clob) {
-          warn("No clobTokenIds on market — cannot trade this market on CLOB");
+        if (positionSize < minOrderUsd) {
+          skip(`Position size $${positionSize.toFixed(2)} too small`);
           continue;
         }
-        const limitPx = Math.min(price + 0.03, 0.99);
-        try {
-          await buyYesLimit(clob, tokenId, limitPx, shares);
-          ok(`CLOB buy order submitted @ limit $${limitPx.toFixed(3)}`);
-        } catch (e) {
-          warn(`CLOB buy failed: ${String(e)}`);
-          continue;
+
+        if (mode === "execute") {
+          const tokenId = getYesTokenId(matched.market);
+          if (!tokenId || !clob) {
+            warn("No clobTokenIds on market — cannot trade this market on CLOB");
+            continue;
+          }
+          const limitPx = Math.min(price + 0.03, 0.99);
+          try {
+            await buyYesLimit(clob, tokenId, limitPx, shares);
+            ok(`CLOB buy order submitted @ limit $${limitPx.toFixed(3)}`);
+          } catch (e) {
+            warn(`CLOB buy failed: ${String(e)}`);
+            continue;
+          }
+          const pos: Position = {
+            question,
+            entry_price: price,
+            shares,
+            cost: positionSize,
+            date: dateStr,
+            location: citySlug,
+            forecast_temp: forecastTemp,
+            opened_at: new Date().toISOString(),
+            token_id: tokenId
+          };
+          positions[marketId] = pos;
+          sim.total_trades += 1;
+          const trade: Trade = {
+            type: "entry",
+            question,
+            entry_price: price,
+            shares,
+            cost: positionSize,
+            opened_at: pos.opened_at
+          };
+          sim.trades.push(trade);
+          tradesExecuted += 1;
+          balance -= positionSize;
+        } else if (mode === "paper") {
+          balance -= positionSize;
+          const pos: Position = {
+            question,
+            entry_price: price,
+            shares,
+            cost: positionSize,
+            date: dateStr,
+            location: citySlug,
+            forecast_temp: forecastTemp,
+            opened_at: new Date().toISOString()
+          };
+          positions[marketId] = pos;
+          sim.total_trades += 1;
+          const trade: Trade = {
+            type: "entry",
+            question,
+            entry_price: price,
+            shares,
+            cost: positionSize,
+            opened_at: pos.opened_at
+          };
+          sim.trades.push(trade);
+          tradesExecuted += 1;
+          ok(
+            `Position opened — $${positionSize.toFixed(2)} deducted from balance`
+          );
+        } else {
+          skip("Dry-run — not buying");
+          tradesExecuted += 1;
         }
-        const pos: Position = {
-          question,
-          entry_price: price,
-          shares,
-          cost: positionSize,
-          date: dateStr,
-          location: citySlug,
-          forecast_temp: forecastTemp,
-          opened_at: new Date().toISOString(),
-          token_id: tokenId
-        };
-        positions[marketId] = pos;
-        sim.total_trades += 1;
-        const trade: Trade = {
-          type: "entry",
-          question,
-          entry_price: price,
-          shares,
-          cost: positionSize,
-          opened_at: pos.opened_at
-        };
-        sim.trades.push(trade);
-        tradesExecuted += 1;
-        balance -= positionSize;
-      } else if (mode === "paper") {
-        balance -= positionSize;
-        const pos: Position = {
-          question,
-          entry_price: price,
-          shares,
-          cost: positionSize,
-          date: dateStr,
-          location: citySlug,
-          forecast_temp: forecastTemp,
-          opened_at: new Date().toISOString()
-        };
-        positions[marketId] = pos;
-        sim.total_trades += 1;
-        const trade: Trade = {
-          type: "entry",
-          question,
-          entry_price: price,
-          shares,
-          cost: positionSize,
-          opened_at: pos.opened_at
-        };
-        sim.trades.push(trade);
-        tradesExecuted += 1;
-        ok(
-          `Position opened — $${positionSize.toFixed(
-            2
-          )} deducted from balance`
-        );
-      } else {
-        skip("Dry-run — not buying");
-        tradesExecuted += 1;
-      }
+      }  // end topBuckets loop
     }
   }
 
