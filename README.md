@@ -1,10 +1,12 @@
 # Polymarket Weather Trading Bot
 
-Node.js / TypeScript trading automation for Polymarket daily temperature markets. The bot combines National Weather Service (NWS) forecast data with Polymarket CLOB pricing: it maps a city’s forecast max temperature to a market bucket, then supports read-only signals, paper trading in a local JSON ledger, or live orders.
+Python & Node.js/TypeScript trading automation for Polymarket daily temperature and monthly precipitation markets. The bot combines high-accuracy ECMWF and Open-Meteo forecast data with Polymarket CLOB pricing. It maps a city’s forecast to a market bucket and executes trades based on strict price and confidence thresholds.
+
+**Current Status:** The bot is currently in **dry-run (forward testing) mode**. Live execution is disabled by default while validating historical win rates and timing.
 
 ## Overview
 
-The bot scans configured cities, finds the matching temperature range for the forecast, compares the YES price to entry and exit thresholds, and either prints signals, updates `simulation.json`, or posts real CLOB orders depending on the selected npm script. Runtime configuration is driven by `.env` (not `config.json` at execution time for the main flows described here).
+The bot scans configured cities, finds the matching bucket for the forecast, compares the YES price to entry thresholds, and simulates or posts real CLOB orders. Runtime configuration is driven by `.env` and Python pipeline scripts.
 
 ---
 
@@ -22,20 +24,40 @@ https://github.com/user-attachments/assets/70ef0168-1671-4057-bb4b-c3435016732b
 
 ### Key features
 
-- **NWS-driven**: Uses NWS observations and forecast data to estimate daily max temperature.
+- **High-Accuracy Models**: Uses ECMWF IFS 0.4° operational forecasts and Open-Meteo ensembles (replacing legacy NWS data).
 - **Bucket matching**: Picks the Polymarket outcome range that contains the forecast temperature.
-- **Three execution modes**: Signal-only, paper (simulated PnL in `simulation.json`), and live CLOB trading.
+- **Laddering / Hedging**: Intelligently hedges by buying adjacent buckets if the forecast lies near a boundary and prices are favorable.
+- **Execution Modes**: Supports simulated dry-run signals (current mode) and live CLOB trading.
 - **Proxy wallet support**: MetaMask signer with Polymarket proxy funder when `USE_PROXY_WALLET` and `SIGNATURE_TYPE=2` are set.
-- **Recurring runs**: Optional `--interval` for scheduled live execution (see `npm run trade`).
+
+## Strategies
+
+We operate two primary arbitrage strategies:
+
+### 1. Daily Temperature Strategy
+- **Frequency**: Daily polling and execution.
+- **Timing**: Scans exactly **36 hours before market close** to capture early alpha before market efficiency sets in.
+- **Model**: ECMWF IFS 0.4° operational forecast & ensemble.
+
+### 2. Monthly Precipitation Strategy
+- **Frequency**: Monthly execution.
+- **Timing**: Scans and evaluates specifically on the **19th of the month**.
+- **Model**: Open-Meteo / ECMWF precipitation ensembles.
+
+### Core Trading Logic (Both Strategies)
+1. **Forecast Ingestion**: Polls the prediction from the forecast model (city/temp/precipitation).
+2. **Market Mapping**: Evaluates the Polymarket bucket ladders for each level.
+3. **Entry Cap**: Aims to trade the predicted market at a price of **`< 0.40`** (under 40% implied probability).
+4. **Laddering / Dual-Entry**: If the forecast lies close to two levels within a confidence band, the bot executes a laddered entry—buying both adjacent markets. By securing both legs at good pricing (e.g., `< 0.30`), the trade resolves net positive regardless of which specific bucket hits.
 
 ## Architecture
 
 ### Technology stack
 
-- **Runtime**: Node.js, TypeScript
+- **Runtime**: Python 3.13 (Pipelines, Forecasting, Strategy), Node.js/TypeScript (CLOB wrapper)
 - **Chain**: Polygon
 - **Execution**: Polymarket CLOB via `@polymarket/clob-client`
-- **Data**: NWS APIs for location-specific weather (see `src/nws.ts` and related modules)
+- **Data**: ECMWF Open Data, Open-Meteo Archive & Ensemble APIs
 - **Config**: `.env` for secrets and strategy parameters; `config.json` is not used for runtime config in the primary flows documented below
 
 ### System flow

@@ -1,5 +1,6 @@
 import { Wallet } from "@ethersproject/wallet";
 import { ClobClient, OrderType, Side } from "@polymarket/clob-client";
+import { info, ok, warn } from "./colors";
 import type { BotConfig } from "./config";
 
 const CLOB_HOST = "https://clob.polymarket.com";
@@ -14,12 +15,10 @@ export function getSignerWallet(cfg: BotConfig): Wallet {
 }
 
 export function getFunderAddress(cfg: BotConfig, wallet?: Wallet): string | undefined {
-  const signatureType = cfg.signature_type;
-  const funder =
-    signatureType === 1 || signatureType === 2
-      ? cfg.polymarket_proxy_wallet_address.trim()
-      : wallet?.address;
-  return funder || undefined;
+  // Align with Python weather_executor: Always use the explicitly provided 
+  // proxy/funder address if it exists, regardless of the signature_type.
+  const proxy = cfg.polymarket_proxy_wallet_address.trim();
+  return proxy ? proxy : (wallet?.address || undefined);
 }
 
 function hasValidApiCreds(value: unknown): value is {
@@ -58,18 +57,23 @@ export async function getApiCreds(cfg: BotConfig): Promise<{
 
   let lastError: unknown;
   try {
+    info("Attempting to derive CLOB API key from signature...");
     const apiCreds = await temp.deriveApiKey();
     if (hasValidApiCreds(apiCreds)) {
+      ok("Successfully derived CLOB API key.");
       return { client: temp, wallet, apiCreds };
     }
     lastError = new Error("deriveApiKey() returned invalid credentials");
   } catch (deriveError) {
     lastError = deriveError;
+    warn(`Could not derive key (this is normal on first run): ${String(deriveError)}`);
   }
 
   try {
+    info("Derivation failed. Attempting to create a new CLOB API key...");
     const apiCreds = await temp.createApiKey();
     if (hasValidApiCreds(apiCreds)) {
+      ok("Successfully created and registered a new CLOB API key.");
       return { client: temp, wallet, apiCreds };
     }
     throw new Error("createApiKey() returned invalid credentials");

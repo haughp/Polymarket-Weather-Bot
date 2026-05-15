@@ -33,12 +33,16 @@ export const STATION_IDS: Record<string, string> = {
 
 const USER_AGENT = "weatherbot-ts/1.0";
 
-export type DailyForecast = Record<string, number>;
+export interface DailyForecasts {
+  max: Record<string, number>;
+  min: Record<string, number>;
+}
 
-export async function getForecast(citySlug: string): Promise<DailyForecast> {
+export async function getForecast(citySlug: string): Promise<DailyForecasts> {
   const forecastUrl = NWS_ENDPOINTS[citySlug];
   const stationId = STATION_IDS[citySlug];
-  const dailyMax: DailyForecast = {};
+  const dailyMax: Record<string, number> = {};
+  const dailyMin: Record<string, number> = {};
   const headers = { "User-Agent": USER_AGENT };
 
   // Real observations — what already happened today
@@ -54,6 +58,9 @@ export async function getForecast(citySlug: string): Promise<DailyForecast> {
         const tempF = Math.round((tempC * 9) / 5 + 32);
         if (!(timeStr in dailyMax) || tempF > dailyMax[timeStr]) {
           dailyMax[timeStr] = tempF;
+        }
+        if (!(timeStr in dailyMin) || tempF < dailyMin[timeStr]) {
+          dailyMin[timeStr] = tempF;
         }
       }
     }
@@ -74,11 +81,13 @@ export async function getForecast(citySlug: string): Promise<DailyForecast> {
       if (!(date in dailyMax) || temp > dailyMax[date]) {
         dailyMax[date] = temp;
       }
+      if (!(date in dailyMin) || temp < dailyMin[date]) {
+        dailyMin[date] = temp;
+      }
     }
   } catch (e) {
     warn(`Forecast error for ${citySlug}: ${String(e)}`);
   }
 
-  return dailyMax;
+  return { max: dailyMax, min: dailyMin };
 }
-

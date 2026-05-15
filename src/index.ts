@@ -9,6 +9,8 @@ import { run, showPositions, type TradeMode } from "./strategy";
 import { getWalletBalanceUsdViaClob } from "./walletBalance";
 
 dotenv.config();
+// Load shared wallet credentials (does not override local .env variables)
+dotenv.config({ path: "/Users/padraighaughey/sniff_test_polymarket/.env" });
 
 function validateKeys(cfg: BotConfig): void {
   const errors: string[] = [];
@@ -16,12 +18,12 @@ function validateKeys(cfg: BotConfig): void {
   const addr = (cfg.polymarket_proxy_wallet_address || "").trim();
 
   if (!pk) {
-    errors.push("POLYMARKET_PRIVATE_KEY is missing in .env");
+    errors.push("Private Key missing (checked local .env and shared POLY_PRIVATE_KEY)");
   } else {
     const bare = pk.startsWith("0x") ? pk.slice(2) : pk;
     if (!/^[a-fA-F0-9]{64}$/.test(bare)) {
       errors.push(
-        "POLYMARKET_PRIVATE_KEY must be 64 hex characters (with or without 0x prefix)"
+        "Private Key must be 64 hex characters (with or without 0x prefix)"
       );
     } else {
       pk = "0x" + bare;
@@ -31,10 +33,10 @@ function validateKeys(cfg: BotConfig): void {
   }
 
   if (!addr) {
-    errors.push("POLYMARKET_PROXY_WALLET_ADDRESS is missing in .env");
+    errors.push("Proxy Wallet Address missing (checked local .env and shared POLY_FUNDER_ADDRESS)");
   } else if (!/^0x[a-fA-F0-9]{40}$/.test(addr)) {
     errors.push(
-      "POLYMARKET_PROXY_WALLET_ADDRESS must be a 0x-prefixed 40-hex address"
+      "Proxy Wallet Address must be a 0x-prefixed 40-hex address"
     );
   }
 
@@ -109,6 +111,25 @@ async function main(): Promise<void> {
   }
 
   const mode: TradeMode = execute ? "execute" : paper ? "paper" : "dry-run";
+
+  const maskedPk = cfg.polymarket_private_key ? `${cfg.polymarket_private_key.substring(0, 6)}••••${cfg.polymarket_private_key.substring(cfg.polymarket_private_key.length - 4)}` : "MISSING";
+  const proxyStr = cfg.polymarket_proxy_wallet_address ? `${cfg.polymarket_proxy_wallet_address.substring(0, 6)}••••${cfg.polymarket_proxy_wallet_address.substring(cfg.polymarket_proxy_wallet_address.length - 4)}` : "Not Used";
+
+  console.info(
+    "\n" +
+      panel(
+        "Configuration & Credentials Check",
+        [
+          stat("Trading Mode", mode.toUpperCase(), "cyan"),
+          stat("Signer Wallet", maskedPk, "green"),
+          stat("Proxy Funder", proxyStr, "green"),
+          stat("Entry Gate", `≤ $${cfg.entry_threshold}`, "blue"),
+          stat("Exit Target", `≥ $${cfg.exit_threshold}`, "magenta"),
+          stat("Max Positions", `${cfg.max_open_positions}`, "yellow")
+        ],
+        "blue"
+      )
+  );
 
   let walletUsd: number | undefined;
   if (mode === "execute") {

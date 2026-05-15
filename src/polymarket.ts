@@ -1,6 +1,21 @@
 import axios from "axios";
 import { warn } from "./colors";
 
+export async function getMarketResolution(marketId: string): Promise<boolean | null> {
+  const url = `https://gamma-api.polymarket.com/markets/${marketId}`;
+  try {
+    const r = await axios.get(url, { timeout: 5000 });
+    if (r.data?.closed || r.data?.resolved || r.data?.isResolved) {
+      const winner = String(r.data?.winner || r.data?.result || "").toLowerCase();
+      if (winner === "yes" || winner === "1") return true;
+      if (winner === "no" || winner === "0") return false;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 export interface PolymarketEvent {
   id: string;
   endDate?: string;
@@ -37,9 +52,10 @@ export async function getPolymarketEvent(
   citySlug: string,
   month: string,
   day: number,
-  year: number
+  year: number,
+  mode: "highest" | "lowest" = "highest"
 ): Promise<PolymarketEvent | null> {
-  const slug = `highest-temperature-in-${citySlug}-on-${month}-${day}-${year}`;
+  const slug = `${mode}-temperature-in-${citySlug}-on-${month}-${day}-${year}`;
   const url = `https://gamma-api.polymarket.com/events?slug=${slug}`;
   try {
     const r = await axios.get(url, { timeout: 10000 });
@@ -65,4 +81,3 @@ export async function getMarketYesPrice(marketId: string): Promise<number | null
     return null;
   }
 }
-

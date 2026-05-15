@@ -215,8 +215,36 @@ def _already_traded_today(session, loc_id: str, smonth: datetime.date, question:
     return c > 0
 
 
-def run(execute: bool = False) -> None:
+def show_recent() -> None:
     session = init_database()
+    trades = (
+        session.query(PrecipStrategyTrade)
+        .filter(PrecipStrategyTrade.mode == "forward_yes_v1")
+        .order_by(PrecipStrategyTrade.timestamp.desc())
+        .limit(30)
+        .all()
+    )
+    if not trades:
+        print("No recent precipitation trades found in database.")
+        return
+        
+    print("\n" + "="*112)
+    print("  PRECIPITATION V1 EXECUTOR HISTORY (Recent 30)")
+    print("="*112)
+    print(f"  {'ID':>5} | {'Date':>19} | {'City':>10} | {'Status':>18} | {'Price':>6} | {'Size':>6} | {'PnL':>8} | {'Question'}")
+    print("-" * 112)
+    for t in trades:
+        date_str = t.timestamp.strftime('%Y-%m-%d %H:%M:%S') if t.timestamp else "unknown"
+        status = f"Blocked: {t.blocked_reason}" if t.blocked_reason else ("Filled" if t.fill_price else "Pending")
+        price = t.fill_price if t.fill_price is not None else t.limit_price
+        pnl_str = f"${t.realized_pnl:+.2f}" if t.realized_pnl is not None else "pending"
+        q_trunc = t.question_text[:35] + "..." if t.question_text and len(t.question_text) > 35 else t.question_text
+        print(f"  {t.id:>5} | {date_str} | {t.location_id:>10} | {status[:18]:>18} | {price:>6.3f} | ${t.size_usd:>5.2f} | {pnl_str:>8} | {q_trunc}")
+    print("=" * 112 + "\n")
+
+
+def run(execute: bool = False) -> None:
+    session = init_database(auto_migrate=True)
     executor = WeatherExecutor(
         trade_size_usdc=TRADE_SIZE_USD,
         dry_run=not execute,
@@ -310,8 +338,13 @@ def run(execute: bool = False) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description="Forward test: $1 BUY YES on forecast bucket")
     ap.add_argument("--execute", action="store_true", help="Submit live orders via CLOB")
+    ap.add_argument("--status", action="store_true", help="Show recent execution history and exit")
     args = ap.parse_args()
-    run(execute=bool(args.execute))
+    
+    if args.status:
+        show_recent()
+    else:
+        run(execute=bool(args.execute))
 
 
 if __name__ == "__main__":
