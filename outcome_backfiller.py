@@ -8,6 +8,7 @@ Replaces per-observatory government APIs (NWS UK bug, HK daily-max bug).
 import sys
 import datetime
 import calendar
+import os
 import httpx
 from database_schema import init_database, Outcome
 
@@ -184,7 +185,6 @@ def _fetch_cdo_extremes(station_id: str, date: datetime.date) -> tuple[float | N
     NOAA CDO GHCND daily — actual ASOS station readings in tenths of °F → °F.
     Requires NOAA_CDO_TOKEN env var. Returns (max_f, min_f) or (None, None).
     """
-    import os
     token = os.environ.get('NOAA_CDO_TOKEN')
     if not token:
         print("   ⚠️  NOAA_CDO_TOKEN not set — falling back to Open-Meteo")
@@ -232,7 +232,6 @@ def fetch_daily_extremes(location_id: str, date: datetime.date) -> tuple[float |
             print(f"   ✅ {location_id:12s} {date}  max={max_t:.1f}{units_label}  min={min_t:.1f}{units_label}  [NOAA CDO]")
             return max_t, min_t
         # CDO token missing or API error — fall through to Open-Meteo
-        print(f"   ⚠️  {location_id}: CDO failed, falling back to Open-Meteo")
 
     max_t, min_t = _fetch_open_meteo_extremes(location_id, date)
     if max_t is not None:
