@@ -142,3 +142,21 @@ def test_extract_forecast_routes_shanghai_to_ecmwf(monkeypatch):
     assert result is not None
     assert len(nws_calls) == 0
     assert len(ecmwf_calls) == 1
+
+
+def test_fetch_nws_forecast_returns_none_when_no_matching_period():
+    from ecmwf_forecast_pipeline import fetch_nws_forecast
+
+    target = datetime.date(2026, 6, 1)
+    # Mock returns periods for 2026-06-02, not the requested 2026-06-01
+    pts, fcast = _make_nws_responses("2026-06-02", 95.0)
+
+    client_mock = MagicMock()
+    client_mock.__enter__ = lambda s: s
+    client_mock.__exit__ = MagicMock(return_value=False)
+    client_mock.get.side_effect = [pts, fcast]
+
+    with patch("ecmwf_forecast_pipeline.httpx.Client", return_value=client_mock):
+        result = fetch_nws_forecast(32.8998, -97.0403, target, "America/Chicago", "fahrenheit")
+
+    assert result is None
