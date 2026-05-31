@@ -5,6 +5,9 @@ ECMWF IFS Forecast Pipeline for Polymarket Weather Arbitrage.
 Single-source spec: one HTTP call per (city, mode) to Open-Meteo's daily
 aggregate with models=ecmwf_ifs025. No GRIB2, no ensemble bands.
 """
+# Observatory coordinates verified against official station metadata 2026-05-31.
+# Moscow (WMO 27612) and Tokyo (WMO 47662) were patched; all others within 0.05°.
+# See docs/superpowers/specs/2026-05-30-ecmwf-pipeline-rebuild-design.md
 
 import datetime
 import httpx
@@ -148,15 +151,15 @@ OBSERVATORIES = {
     },
     'moscow': {
         'name': 'Moscow WMO Station',
-        'lat': 55.7517,
-        'lon': 37.6178,
+        'lat': 55.8300,
+        'lon': 37.6100,
         'units': 'celsius',
         'volume': 79755
     },
     'tokyo': {
         'name': 'Tokyo JMA Observatory',
-        'lat': 35.6894,
-        'lon': 139.6917,
+        'lat': 35.6900,
+        'lon': 139.7500,
         'units': 'celsius',
         'volume': 74820
     },

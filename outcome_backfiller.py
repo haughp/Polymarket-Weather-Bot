@@ -115,12 +115,12 @@ OBSERVATORIES = {
         'source_name': 'Singapore Changi Airport',
     },
     'moscow': {
-        'lat': 55.7517, 'lon': 37.6178,
+        'lat': 55.8300, 'lon': 37.6100,
         'timezone': 'Europe/Moscow', 'units': 'celsius',
         'source_name': 'Moscow WMO Station',
     },
     'tokyo': {
-        'lat': 35.6894, 'lon': 139.6917,
+        'lat': 35.6900, 'lon': 139.7500,
         'timezone': 'Asia/Tokyo', 'units': 'celsius',
         'source_name': 'Tokyo JMA Observatory',
     },
