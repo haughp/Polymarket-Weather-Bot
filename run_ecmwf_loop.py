@@ -1,4 +1,4 @@
-#!/Library/Frameworks/Python.framework/Versions/3.13/bin/python3
+#!/Library/Frameworks/Python.framework/Versions/3.13/bin/python3 -u
 """
 ECMWF Weather Pipeline Loop Runner
 Runs ecmwf_forecast_pipeline + polymarket_dry_run every 6 hours aligned to
@@ -15,8 +15,7 @@ import time
 import datetime
 import logging
 
-# Must run from the Weather Bot directory so the GRIB2 download lands here
-# and relative imports (database_schema, etc.) resolve correctly.
+# Must run from the Weather Bot directory so relative imports resolve correctly.
 WEATHER_BOT_DIR = os.path.dirname(os.path.abspath(__file__))
 os.chdir(WEATHER_BOT_DIR)
 if WEATHER_BOT_DIR not in sys.path:
@@ -32,20 +31,21 @@ log = logging.getLogger(__name__)
 
 
 def _next_ecmwf_utc() -> datetime.datetime:
-    """UTC datetime of the next ECMWF data availability window (+4h30m after analysis)."""
+    """UTC datetime of the next ECMWF data availability window (04:30, 10:30, 16:30, 22:30)."""
     now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
-    current_analysis_hour = (now.hour // 6) * 6
-    next_analysis_hour = current_analysis_hour + 6
 
-    if next_analysis_hour < 24:
-        target = now.replace(hour=next_analysis_hour, minute=30, second=0, microsecond=0)
-    else:
-        target = (now + datetime.timedelta(days=1)).replace(
-            hour=next_analysis_hour % 24, minute=30, second=0, microsecond=0)
-    return target
+    for target_hour in [4, 10, 16, 22]:
+        target = now.replace(hour=target_hour, minute=30, second=0, microsecond=0)
+        if target > now:
+            return target
+
+    return (now + datetime.timedelta(days=1)).replace(
+        hour=4, minute=30, second=0, microsecond=0
+    )
 
 
 def _run_pipeline(full_refresh: bool = True) -> bool:
+    import importlib
     log.info("=" * 60)
     log.info("Pipeline run starting  [%s]", "FULL" if full_refresh else "RETRY")
     log.info("=" * 60)
@@ -53,6 +53,7 @@ def _run_pipeline(full_refresh: bool = True) -> bool:
     if full_refresh:
         try:
             import ecmwf_forecast_pipeline
+            importlib.reload(ecmwf_forecast_pipeline)
             ecmwf_forecast_pipeline.main()
             log.info("Stage 1 ✅  ECMWF forecast pipeline complete")
         except Exception as exc:
@@ -61,7 +62,7 @@ def _run_pipeline(full_refresh: bool = True) -> bool:
 
     try:
         import polymarket_dry_run
-        import importlib; importlib.reload(polymarket_dry_run)
+        importlib.reload(polymarket_dry_run)
         polymarket_dry_run.main(pending_only=not full_refresh)
         log.info("Stage 2 ✅  Temperature YES scan complete")
     except Exception as exc:
@@ -70,6 +71,7 @@ def _run_pipeline(full_refresh: bool = True) -> bool:
     if full_refresh:
         try:
             import precip_forecast_pipeline
+            importlib.reload(precip_forecast_pipeline)
             precip_forecast_pipeline.main()
             log.info("Stage 3a ✅  Precipitation forecast pipeline complete")
         except Exception as exc:
@@ -77,25 +79,27 @@ def _run_pipeline(full_refresh: bool = True) -> bool:
 
         try:
             import polymarket_precip_dry_run
+            importlib.reload(polymarket_precip_dry_run)
             polymarket_precip_dry_run.main()
             log.info("Stage 3b ✅  Precipitation Polymarket dry run complete")
         except Exception as exc:
             log.error("Stage 3b ❌  Precipitation dry run failed: %s", exc)
 
-    try:
-        import outcome_backfiller
-        outcome_backfiller.backfill_outcomes(days_back=7)
-        outcome_backfiller.backfill_precip_outcomes(months_back=3)
-        log.info("Stage 4 ✅  Outcome backfiller complete")
-    except Exception as exc:
-        log.error("Stage 4 ❌  Outcome backfiller failed: %s", exc)
+        try:
+            import outcome_backfiller
+            importlib.reload(outcome_backfiller)
+            outcome_backfiller.backfill_outcomes(days_back=7)
+            outcome_backfiller.backfill_precip_outcomes(months_back=3)
+            log.info("Stage 4 ✅  Outcome backfiller complete")
+        except Exception as exc:
+            log.error("Stage 4 ❌  Outcome backfiller failed: %s", exc)
 
-    try:
-        import outcome_backfiller
-        outcome_backfiller.settle_temperature_pnl()
-        log.info("Stage 5 ✅  Temperature PnL settlement complete")
-    except Exception as exc:
-        log.error("Stage 5 ❌  PnL settlement failed: %s", exc)
+        try:
+            import outcome_backfiller
+            outcome_backfiller.settle_temperature_pnl()
+            log.info("Stage 5 ✅  Temperature PnL settlement complete")
+        except Exception as exc:
+            log.error("Stage 5 ❌  PnL settlement failed: %s", exc)
 
     return True
 
@@ -186,24 +190,30 @@ def main() -> None:
     next_ecmwf = _next_ecmwf_utc()
 
     while True:
-        now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
-        secs_to_ecmwf = (next_ecmwf - now).total_seconds()
-        sleep_secs = min(3600, max(60, secs_to_ecmwf))
+        try:
+            log.info("─── Loop tick — checking wake schedule ───")
+            now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+            secs_to_ecmwf = (next_ecmwf - now).total_seconds()
+            sleep_secs = min(1800, max(60, secs_to_ecmwf))
 
-        next_wake = now + datetime.timedelta(seconds=sleep_secs)
-        log.info(
-            "Next wake in %.1fh at %s UTC  (next ECMWF refresh at %s UTC)",
-            sleep_secs / 3600,
-            next_wake.strftime("%Y-%m-%d %H:%M"),
-            next_ecmwf.strftime("%Y-%m-%d %H:%M"),
-        )
-        time.sleep(sleep_secs)
+            next_wake = now + datetime.timedelta(seconds=sleep_secs)
+            log.info(
+                "Next wake in %.1fh at %s UTC  (next ECMWF refresh at %s UTC)",
+                sleep_secs / 3600,
+                next_wake.strftime("%Y-%m-%d %H:%M"),
+                next_ecmwf.strftime("%Y-%m-%d %H:%M"),
+            )
+            time.sleep(sleep_secs)
 
-        now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
-        do_full = now >= next_ecmwf
-        _run_pipeline(full_refresh=do_full)
-        if do_full:
-            next_ecmwf = _next_ecmwf_utc()
+            now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+            do_full = now >= next_ecmwf
+            _run_pipeline(full_refresh=do_full)
+            if do_full:
+                next_ecmwf = _next_ecmwf_utc()
+
+        except Exception:
+            log.exception("Loop body crashed — sleeping 60s before retry")
+            time.sleep(60)
 
 
 if __name__ == "__main__":
