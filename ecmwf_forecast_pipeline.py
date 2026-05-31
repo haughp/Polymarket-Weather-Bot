@@ -1,21 +1,28 @@
 #!/usr/bin/env python3
 """
-ECMWF IFS Forecast Pipeline for Polymarket Weather Arbitrage
-96.2% verified AUC @ 36 hour horizon
+ECMWF IFS Forecast Pipeline for Polymarket Weather Arbitrage.
+
+Single-source spec: one HTTP call per (city, mode) to Open-Meteo's daily
+aggregate with models=ecmwf_ifs025. No GRIB2, no ensemble bands.
 """
 
 import datetime
-import numpy as np
-import xarray as xr
-import pandas as pd
 import httpx
 from zoneinfo import ZoneInfo
-from ecmwf.opendata import Client
 from database_schema import init_database, Forecast
 
-OPEN_METEO_ENSEMBLE = "https://ensemble-api.open-meteo.com/v1/ensemble"
+OPEN_METEO_DAILY = "https://api.open-meteo.com/v1/forecast"
 
-# IANA timezone per location — used to target 3 PM local (daily max proxy)
+NWS_POINTS_URL = "https://api.weather.gov/points"
+NWS_USER_AGENT = "polymarket-weather-bot/1.0 (contact: admin@example.com)"
+
+# US cities served by NWS Point Forecast API — used instead of Open-Meteo ECMWF
+# for better alignment with Polymarket's NWS-based resolution source.
+NWS_FORECAST_US_CITIES = frozenset({'dallas', 'new_york', 'atlanta', 'austin'})
+
+# IANA timezone per location — used to pick the right local-date index
+# from the Open-Meteo daily series, and to share the same target_date
+# logic as polymarket_dry_run.py (now_local + 1 day).
 LOCATION_TIMEZONES = {
     'shanghai':     'Asia/Shanghai',
     'hong_kong':    'Asia/Hong_Kong',
@@ -184,229 +191,166 @@ OBSERVATORIES = {
 }
 
 
-def _quantile(sorted_vals: list, q: float) -> float:
-    if not sorted_vals:
-        return 0.0
-    if len(sorted_vals) == 1:
-        return float(sorted_vals[0])
-    pos = (len(sorted_vals) - 1) * q
-    lo = int(pos)
-    hi = min(lo + 1, len(sorted_vals) - 1)
-    frac = pos - lo
-    return sorted_vals[lo] * (1.0 - frac) + sorted_vals[hi] * frac
+def target_date_for(location_id: str) -> datetime.date:
+    """Tomorrow in the location's local timezone — matches polymarket_dry_run.py."""
+    tz = ZoneInfo(LOCATION_TIMEZONES[location_id])
+    now_local = datetime.datetime.now(datetime.timezone.utc).astimezone(tz)
+    return (now_local + datetime.timedelta(days=1)).date()
 
 
-def fetch_ecmwf_ensemble_bands(
+def fetch_ecmwf_daily_and_peak(
     lat: float,
     lon: float,
-    target_date: 'datetime.date',
+    target_date: datetime.date,
     timezone: str,
     units: str,
     mode: str = 'max',
-) -> tuple | None:
+) -> tuple[float, datetime.datetime] | None:
     """
-    Fetch ECMWF IFS ensemble (50 members) from Open-Meteo and return
-    (p10, p50, p90) of the daily-max temperature on target_date.
-
-    Mirrors precip_forecast_pipeline.fetch_ensemble_monthly_distribution().
-    Returns values in native units (celsius or fahrenheit), or None on failure.
+    Fetch Open-Meteo daily aggregate + hourly series (ECMWF IFS 0.25°) for one
+    (lat, lon). Returns (forecast_value, peak_time_utc) where peak_time is the
+    UTC instant of the daily extremum on target_date (selected from the hourly
+    series). Returns None on failure.
     """
     temp_unit = 'fahrenheit' if units == 'fahrenheit' else 'celsius'
+    daily_field = 'temperature_2m_max' if mode == 'max' else 'temperature_2m_min'
+
     days_ahead = (target_date - datetime.date.today()).days + 2
 
     try:
-        with httpx.Client(timeout=25) as client:
-            r = client.get(OPEN_METEO_ENSEMBLE, params={
+        with httpx.Client(timeout=20) as client:
+            r = client.get(OPEN_METEO_DAILY, params={
                 'latitude':         lat,
                 'longitude':        lon,
+                'daily':            daily_field,
                 'hourly':           'temperature_2m',
                 'temperature_unit': temp_unit,
                 'timezone':         timezone,
                 'models':           'ecmwf_ifs025',
-                'forecast_days':    min(max(days_ahead, 3), 15),
+                'forecast_days':    min(max(days_ahead, 3), 14),
             })
             r.raise_for_status()
             data = r.json()
-
-        hourly = data.get('hourly', {})
-        times  = hourly.get('time', [])
-
-        member_keys = sorted(
-            k for k in hourly.keys()
-            if 'temperature_2m' in k and k != 'temperature_2m'
-        )
-        if not member_keys:
-            return None
-
-        target_str = target_date.isoformat()
-        if mode == 'max':
-            target_indices = [
-                i for i, t in enumerate(times)
-                if t.startswith(target_str) and '12:00' <= t[11:16] <= '18:00'
-            ]
-        else:
-            target_indices = [
-                i for i, t in enumerate(times)
-                if t.startswith(target_str) and '00:00' <= t[11:16] <= '08:00'
-            ]
-        if not target_indices:
-            return None
-
-        # For each member take the extreme over the target window
-        member_extremes: list[float] = []
-        for key in member_keys:
-            vals = hourly.get(key, [])
-            member_vals = [
-                float(vals[i]) for i in target_indices
-                if i < len(vals) and vals[i] is not None
-            ]
-            if member_vals:
-                if mode == 'max':
-                    member_extremes.append(max(member_vals))
-                else:
-                    member_extremes.append(min(member_vals))
-
-        if len(member_extremes) < 5:
-            return None
-
-        member_extremes.sort()
-        return (
-            round(_quantile(member_extremes, 0.10), 1),
-            round(_quantile(member_extremes, 0.50), 1),
-            round(_quantile(member_extremes, 0.90), 1),
-        )
     except Exception as e:
-        print(f"   ⚠️  Ensemble API error for ({lat},{lon}): {e}")
+        print(f"   ⚠️  Open-Meteo error for ({lat},{lon}) {mode}: {e}")
         return None
 
+    target_str = target_date.isoformat()
 
-def bilinear_interpolation(ds, target_lat, target_lon):
-    """
-    Exact bilinear interpolation at exact coordinate point
-    No grid snapping. This is the single most important function for accuracy.
-    """
-    lats = ds.latitude.values
-    lons = ds.longitude.values
+    daily = data.get('daily', {})
+    daily_times = daily.get('time', [])
+    daily_vals = daily.get(daily_field, [])
+    try:
+        d_idx = daily_times.index(target_str)
+    except ValueError:
+        print(f"   ⚠️  Target date {target_str} not in daily response for ({lat},{lon})")
+        return None
+    if d_idx >= len(daily_vals) or daily_vals[d_idx] is None:
+        return None
+    forecast_value = float(daily_vals[d_idx])
 
-    # Find 4 surrounding grid points
-    i_lat = np.searchsorted(lats[::-1], target_lat)
-    j_lon = np.searchsorted(lons, target_lon)
-
-    lat0, lat1 = lats[::-1][i_lat-1], lats[::-1][i_lat]
-    lon0, lon1 = lons[j_lon-1], lons[j_lon]
-
-    # Weight factors
-    w_lat = (target_lat - lat0) / (lat1 - lat0)
-    w_lon = (target_lon - lon0) / (lon1 - lon0)
-
-    # Extract 4 corner values
-    v00 = ds.sel(latitude=lat0, longitude=lon0).values
-    v01 = ds.sel(latitude=lat0, longitude=lon1).values
-    v10 = ds.sel(latitude=lat1, longitude=lon0).values
-    v11 = ds.sel(latitude=lat1, longitude=lon1).values
-
-    # Bilinear interpolation
-    v = (1-w_lat)*(1-w_lon)*v00 + (1-w_lat)*w_lon*v01 + w_lat*(1-w_lon)*v10 + w_lat*w_lon*v11
-
-    return float(v)
-
-
-def download_latest_ecmwf_forecast():
-    """Download latest ECMWF IFS 0.4° operational forecast"""
-    # Use Azure CDN mirror for unlimited bandwidth and no connection limits
-    client = Client(source="azure")
-
-    print("✅ Connecting to ECMWF Open Data...")
-    
-    print("📥 Downloading 2m temperature forecast...")
-    client.retrieve(
-        step=list(range(0, 144, 3)),
-        type="fc",
-        param="2t",
-        target="ecmwf_2t.grib2"
-    )
-
-    print("✅ Forecast downloaded successfully")
-    return xr.open_dataset('ecmwf_2t.grib2', engine='cfgrib')
-
-
-def _target_step_hours(ds, location_id: str, mode: str = 'max') -> int:
-    """
-    Return the ECMWF step (in whole hours) that best represents the daily
-    maximum or minimum temperature for the target market date at this location.
-
-    The target date matches what polymarket_dry_run.py uses: current local
-    time + 1 day.  We aim for 3 PM local on that date (daily max proxy),
-    then snap to the nearest available 3-hour step.
-    """
-    tz = ZoneInfo(LOCATION_TIMEZONES[location_id])
-    run_utc = pd.Timestamp(ds.time.values).to_pydatetime().replace(tzinfo=datetime.timezone.utc)
-
-    # Use current wall-clock time (not run time) to match polymarket_dry_run.py's
-    # target_date logic: "now_local + 1 day".
-    now_utc = datetime.datetime.now(datetime.timezone.utc)
-    now_local = now_utc.astimezone(tz)
-    target_date = (now_local + datetime.timedelta(days=1)).date()
+    hourly = data.get('hourly', {})
+    h_times = hourly.get('time', [])
+    h_vals  = hourly.get('temperature_2m', [])
+    target_hours = [
+        (t, v) for t, v in zip(h_times, h_vals)
+        if t.startswith(target_str) and v is not None
+    ]
+    if not target_hours:
+        print(f"   ⚠️  No hourly values for {target_str} at ({lat},{lon})")
+        return None
 
     if mode == 'max':
-        target_time = datetime.time(15, 0)
+        peak_local_iso, _ = max(target_hours, key=lambda x: x[1])
     else:
-        target_time = datetime.time(5, 0)
-    
-    target_dt = datetime.datetime.combine(target_date, target_time, tzinfo=tz)
-    target_utc = target_dt.astimezone(datetime.timezone.utc)
-    target_hours = (target_utc - run_utc).total_seconds() / 3600
+        peak_local_iso, _ = min(target_hours, key=lambda x: x[1])
 
-    # Snap to nearest available 3-hour step
-    available_steps_h = sorted(int(s / 3.6e12) for s in ds.step.values)
-    snapped = min(available_steps_h, key=lambda h: abs(h - target_hours))
-    return snapped
+    peak_local_naive = datetime.datetime.fromisoformat(peak_local_iso)
+    peak_utc = peak_local_naive.replace(tzinfo=ZoneInfo(timezone)).astimezone(datetime.timezone.utc)
+
+    return forecast_value, peak_utc.replace(tzinfo=None)
 
 
-def extract_forecast(ds, location_id: str, mode: str = 'max') -> dict:
-    """Extract forecast value for a specific location targeting tomorrow's daily max or min."""
+def fetch_nws_forecast(
+    lat: float,
+    lon: float,
+    target_date: datetime.date,
+    timezone: str,
+    units: str,
+    mode: str = 'max',
+) -> tuple[float, datetime.datetime] | None:
+    """
+    NWS Point Forecast API for US cities. No API key required.
+    Returns (forecast_temp, peak_time_utc) or None on failure.
+    NWS always returns °F; converted to celsius if units='celsius'.
+    """
+    try:
+        with httpx.Client(
+            timeout=20,
+            headers={'User-Agent': NWS_USER_AGENT},
+        ) as client:
+            r = client.get(f"{NWS_POINTS_URL}/{lat:.4f},{lon:.4f}")
+            r.raise_for_status()
+            forecast_url = r.json()['properties']['forecast']
+
+            r2 = client.get(forecast_url)
+            r2.raise_for_status()
+            periods = r2.json()['properties']['periods']
+    except Exception as e:
+        print(f"   ⚠️  NWS error for ({lat},{lon}): {e}")
+        return None
+
+    target_str = target_date.isoformat()
+    want_daytime = (mode == 'max')
+
+    for period in periods:
+        if period['startTime'][:10] == target_str and period['isDaytime'] == want_daytime:
+            temp_f = float(period['temperature'])
+            if units == 'celsius':
+                forecast_temp = round((temp_f - 32.0) * 5.0 / 9.0, 1)
+            else:
+                forecast_temp = round(temp_f, 1)
+            peak_utc = (
+                datetime.datetime.fromisoformat(period['startTime'])
+                .astimezone(datetime.timezone.utc)
+                .replace(tzinfo=None)
+            )
+            return forecast_temp, peak_utc
+
+    label = 'daytime' if want_daytime else 'nighttime'
+    print(f"   ⚠️  NWS: no {label} period for {target_str} at ({lat},{lon})")
+    return None
+
+
+def extract_forecast(location_id: str, mode: str = 'max') -> dict | None:
+    """Build a forecast row for a single (location_id, mode). Returns None on failure."""
     obs = OBSERVATORIES[location_id]
-    hours_ahead = _target_step_hours(ds, location_id, mode)
+    target_date = target_date_for(location_id)
 
-    temp_k = bilinear_interpolation(
-        ds.t2m.sel(step=np.timedelta64(hours_ahead, 'h')), obs['lat'], obs['lon']
-    )
-    temp_c = temp_k - 273.15
-    temp = temp_c * 9/5 + 32 if obs['units'] == 'fahrenheit' else temp_c
-
-    # Derive target date (matches _target_step_hours logic)
-    tz = ZoneInfo(LOCATION_TIMEZONES[location_id])
-    now_local = datetime.datetime.now(datetime.timezone.utc).astimezone(tz)
-    target_date = (now_local + datetime.timedelta(days=1)).date()
-
-    # Use actual ECMWF ensemble P10/P90 spread as the confidence band.
-    # Falls back to fixed ±1°C / ±1.8°F only if the ensemble API is unreachable.
-    ensemble = fetch_ecmwf_ensemble_bands(
-        obs['lat'], obs['lon'], target_date,
-        LOCATION_TIMEZONES[location_id], obs['units'], mode
-    )
-    if ensemble is not None:
-        _p10, _p50, _p90 = ensemble
-        lower_band = _p10
-        upper_band = _p90
-        band_source = 'ecmwf_ensemble'
+    if location_id in NWS_FORECAST_US_CITIES:
+        result = fetch_nws_forecast(
+            obs['lat'], obs['lon'], target_date,
+            LOCATION_TIMEZONES[location_id], obs['units'], mode,
+        )
     else:
-        fallback = 1.8 if obs['units'] == 'fahrenheit' else 1.0
-        lower_band = round(temp - fallback, 1)
-        upper_band = round(temp + fallback, 1)
-        band_source = 'fixed_fallback'
+        result = fetch_ecmwf_daily_and_peak(
+            obs['lat'], obs['lon'], target_date,
+            LOCATION_TIMEZONES[location_id], obs['units'], mode,
+        )
+
+    if result is None:
+        return None
+    temp, peak_utc = result
 
     return {
-        'location_id': location_id,
-        'mode': mode,
-        'name': obs['name'],
+        'location_id':   location_id,
+        'mode':          mode,
+        'name':          obs['name'],
         'forecast_temp': round(temp, 1),
-        'horizon_hours': hours_ahead,
-        'units': obs['units'],
-        'lower_band': lower_band,
-        'upper_band': upper_band,
-        'band_source': band_source,
-        'confidence': 0.962
+        'target_date':   target_date,
+        'peak_time':     peak_utc,
+        'units':         obs['units'],
+        'confidence':    0.962,
     }
 
 
@@ -414,54 +358,64 @@ def main():
     print("=" * 70)
     print("ECMWF Forecast Pipeline for Polymarket Weather Arbitrage")
     print("=" * 70)
-
-    ds = download_latest_ecmwf_forecast()
-
-    print("\n🌍 Extracting forecasts for target locations:")
+    print("Source: Open-Meteo daily aggregate (models=ecmwf_ifs025)")
     print("-" * 70)
 
     results = []
+    skipped = []
     for loc_id in OBSERVATORIES.keys():
         for mode in ['max', 'min']:
-            fc = extract_forecast(ds, loc_id, mode)
+            fc = extract_forecast(loc_id, mode)
+            if fc is None:
+                skipped.append((loc_id, mode))
+                continue
             results.append(fc)
-    
-            band_label = f"[{fc['lower_band']}, {fc['upper_band']}]"
-            src = '📊 ecmwf_ensemble' if fc.get('band_source') == 'ecmwf_ensemble' else '⚠️  fixed_fallback'
-            print(f"\n📍 {fc['name']} ({mode.upper()}):")
-            print(f"   Forecast: {fc['forecast_temp']} °{fc['units'].upper()[0]}")
-            print(f"   Confidence Band (P10–P90): {band_label}  {src}")
 
-    print("\n✅ Forecast run completed successfully")
+            units_label = '°F' if fc['units'] == 'fahrenheit' else '°C'
+            tz = ZoneInfo(LOCATION_TIMEZONES[loc_id])
+            peak_local = fc['peak_time'].replace(tzinfo=datetime.timezone.utc).astimezone(tz)
+            print(f"\n📍 {fc['name']} ({mode.upper()}):")
+            print(f"   Forecast: {fc['forecast_temp']} {units_label}  "
+                  f"peak {peak_local.strftime('%Y-%m-%d %H:%M %Z')}  (target {fc['target_date']})")
+
+    if skipped:
+        print(f"\n⚠️  Skipped {len(skipped)} (city, mode) pairs with no daily aggregate: "
+              f"{', '.join(f'{c}/{m}' for c, m in skipped)}")
+
+    if not results:
+        print("\n❌ No forecasts produced — aborting DB write")
+        return
+
+    print(f"\n✅ Forecast run produced {len(results)} rows")
 
     # Initialize database connection
     session = init_database(auto_migrate=True)
-    
-    # Insert forecasts into database
+
+    # Bucket the run time to the hour for de-dup grouping
     ecmwf_run_time = datetime.datetime.now(datetime.timezone.utc).replace(
         tzinfo=None, minute=0, second=0, microsecond=0
     )
-    ecmwf_run_time = ecmwf_run_time.replace(hour=(ecmwf_run_time.hour // 6) * 6)
 
     for r in results:
         forecast = Forecast(
-            location_id = r['location_id'],
-            mode = r['mode'],
+            location_id   = r['location_id'],
+            mode          = r['mode'],
             location_name = r['name'],
             forecast_temp = r['forecast_temp'],
-            lower_band = r['lower_band'],
-            upper_band = r['upper_band'],
-            horizon_hours = r['horizon_hours'],
-            ecmwf_run = ecmwf_run_time,
-            units = r['units'],
-            confidence = r['confidence']
+            lower_band    = None,
+            upper_band    = None,
+            horizon_hours = None,
+            ecmwf_run     = ecmwf_run_time,
+            units         = r['units'],
+            confidence    = r['confidence'],
+            peak_time     = r['peak_time'],
         )
         session.add(forecast)
-    
+
     session.commit()
     session.close()
 
-    print(f"\n📝 {len(results)} forecasts saved to PostgreSQL database")
+    print(f"📝 {len(results)} forecasts saved to PostgreSQL database")
 
 
 if __name__ == "__main__":
