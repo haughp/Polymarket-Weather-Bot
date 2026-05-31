@@ -13,6 +13,20 @@ from database_schema import init_database, Outcome
 
 OPEN_METEO_ARCHIVE = "https://archive-api.open-meteo.com/v1/archive"
 
+NOAA_CDO_URL = "https://www.ncdc.noaa.gov/cdo-web/api/v2/data"
+
+# GHCND station IDs for US cities — actual ASOS station readings,
+# same source Polymarket uses to resolve US temperature markets.
+US_GHCND_STATIONS = {
+    'new_york': 'USW00094728',   # Central Park ASOS
+    'atlanta':  'USW00013874',   # Hartsfield-Jackson Intl
+    'dallas':   'USW00003927',   # Dallas/Fort Worth Intl
+    'chicago':  'USW00094846',   # O'Hare Intl
+    'miami':    'USW00012839',   # Miami Intl
+    'seattle':  'USW00024233',   # Seattle-Tacoma Intl
+    'austin':   'USW00013958',   # Austin-Bergstrom Intl
+}
+
 OBSERVATORIES = {
     'shanghai': {
         'lat': 31.1678, 'lon': 121.4369,
@@ -74,6 +88,21 @@ OBSERVATORIES = {
         'timezone': 'America/New_York', 'units': 'fahrenheit',
         'source_name': 'Hartsfield-Jackson Atlanta International Airport',
     },
+    'chicago': {
+        'lat': 41.9802, 'lon': -87.9090,
+        'timezone': 'America/Chicago', 'units': 'fahrenheit',
+        'source_name': "O'Hare International Airport",
+    },
+    'miami': {
+        'lat': 25.7959, 'lon': -80.2870,
+        'timezone': 'America/New_York', 'units': 'fahrenheit',
+        'source_name': 'Miami International Airport',
+    },
+    'seattle': {
+        'lat': 47.4502, 'lon': -122.3088,
+        'timezone': 'America/Los_Angeles', 'units': 'fahrenheit',
+        'source_name': 'Seattle-Tacoma International Airport',
+    },
     'buenos_aires': {
         'lat': -34.5819, 'lon': -58.4804,
         'timezone': 'America/Argentina/Buenos_Aires', 'units': 'celsius',
@@ -117,21 +146,18 @@ OBSERVATORIES = {
 }
 
 
-def fetch_daily_extremes(location_id: str, date: datetime.date) -> tuple[float | None, float | None]:
-    """
-    Fetch daily max and min temperature for a location via Open-Meteo Archive API.
-    Returns (max_temp, min_temp) in the location's native units, or (None, None) on failure.
-    """
+def _fetch_open_meteo_extremes(location_id: str, date: datetime.date) -> tuple[float | None, float | None]:
+    """Open-Meteo Archive API at observatory coordinates. Used for all non-US cities."""
     obs = OBSERVATORIES[location_id]
     temp_unit = 'fahrenheit' if obs['units'] == 'fahrenheit' else 'celsius'
 
     params = {
-        'latitude': obs['lat'],
-        'longitude': obs['lon'],
-        'start_date': date.isoformat(),
-        'end_date': date.isoformat(),
-        'daily': 'temperature_2m_max,temperature_2m_min',
-        'timezone': obs['timezone'],
+        'latitude':         obs['lat'],
+        'longitude':        obs['lon'],
+        'start_date':       date.isoformat(),
+        'end_date':         date.isoformat(),
+        'daily':            'temperature_2m_max,temperature_2m_min',
+        'timezone':         obs['timezone'],
         'temperature_unit': temp_unit,
     }
 
@@ -151,6 +177,71 @@ def fetch_daily_extremes(location_id: str, date: datetime.date) -> tuple[float |
     except Exception as e:
         print(f"⚠️  Open-Meteo error for {location_id} on {date}: {e}")
         return None, None
+
+
+def _fetch_cdo_extremes(station_id: str, date: datetime.date) -> tuple[float | None, float | None]:
+    """
+    NOAA CDO GHCND daily — actual ASOS station readings in tenths of °F → °F.
+    Requires NOAA_CDO_TOKEN env var. Returns (max_f, min_f) or (None, None).
+    """
+    import os
+    token = os.environ.get('NOAA_CDO_TOKEN')
+    if not token:
+        print("   ⚠️  NOAA_CDO_TOKEN not set — falling back to Open-Meteo")
+        return None, None
+
+    try:
+        with httpx.Client(timeout=20) as client:
+            r = client.get(NOAA_CDO_URL, params={
+                'datasetid':  'GHCND',
+                'stationid':  f'GHCND:{station_id}',
+                'startdate':  date.isoformat(),
+                'enddate':    date.isoformat(),
+                'datatypeid': 'TMAX,TMIN',
+                'units':      'standard',
+                'limit':      10,
+            }, headers={'token': token})
+            r.raise_for_status()
+            results = r.json().get('results', [])
+    except Exception as e:
+        print(f"   ⚠️  NOAA CDO error for {station_id} on {date}: {e}")
+        return None, None
+
+    tmax = tmin = None
+    for item in results:
+        if item['datatype'] == 'TMAX':
+            tmax = round(item['value'] / 10.0, 1)   # tenths of °F → °F
+        elif item['datatype'] == 'TMIN':
+            tmin = round(item['value'] / 10.0, 1)
+
+    return tmax, tmin
+
+
+def fetch_daily_extremes(location_id: str, date: datetime.date) -> tuple[float | None, float | None]:
+    """
+    Fetch daily max and min temperature for a location.
+    US cities route to NOAA CDO (actual ASOS readings) with Open-Meteo fallback.
+    All other cities use Open-Meteo Archive (ERA5 reanalysis).
+    Returns (max_temp, min_temp) in the location's native units, or (None, None).
+    """
+    if location_id in US_GHCND_STATIONS:
+        max_t, min_t = _fetch_cdo_extremes(US_GHCND_STATIONS[location_id], date)
+        if max_t is not None:
+            obs = OBSERVATORIES[location_id]
+            units_label = '°F' if obs['units'] == 'fahrenheit' else '°C'
+            print(f"   ✅ {location_id:12s} {date}  max={max_t:.1f}{units_label}  min={min_t:.1f}{units_label}  [NOAA CDO]")
+            return max_t, min_t
+        # CDO token missing or API error — fall through to Open-Meteo
+        print(f"   ⚠️  {location_id}: CDO failed, falling back to Open-Meteo")
+
+    max_t, min_t = _fetch_open_meteo_extremes(location_id, date)
+    if max_t is not None:
+        obs = OBSERVATORIES[location_id]
+        units_label = '°F' if obs['units'] == 'fahrenheit' else '°C'
+        print(f"   ✅ {location_id:12s} {date}  max={max_t:.1f}{units_label}  min={min_t:.1f}{units_label}  [Open-Meteo]")
+    else:
+        print(f"   ❌ No data — {location_id} {date}")
+    return max_t, min_t
 
 
 def backfill_outcomes(days_back: int = 7) -> None:
@@ -197,8 +288,6 @@ def backfill_outcomes(days_back: int = 7) -> None:
                 ))
 
             backfilled += 1
-            units_label = '°F' if obs['units'] == 'fahrenheit' else '°C'
-            print(f"   ✅ {location_id:12s} {target_date}  max={max_temp:.1f}{units_label}  min={min_temp:.1f}{units_label}")
 
     session.commit()
     session.close()
@@ -347,10 +436,15 @@ def settle_temperature_pnl(session=None) -> None:
         else:
             actual = float(outcome.actual_max_temp)
         
-        # Safely handle 'above X' (hi is None) and 'below X' (lo is None) buckets
-        lower_bound = lo if lo is not None else float('-inf')
-        upper_bound = hi if hi is not None else float('inf')
-        won = lower_bound <= actual <= upper_bound
+        # Single-degree city markets ("be 27°C") resolve YES when the rounded
+        # reading equals the bucket integer — not on strict equality with the
+        # fractional actual. Range/open-ended buckets keep containment semantics.
+        if lo is not None and hi is not None and lo == hi:
+            won = round(actual) == lo
+        else:
+            lower_bound = lo if lo is not None else float('-inf')
+            upper_bound = hi if hi is not None else float('inf')
+            won = lower_bound <= actual <= upper_bound
         
         size  = float(trade.size)
         price = float(trade.price)
