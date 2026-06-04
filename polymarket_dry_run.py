@@ -71,6 +71,71 @@ LOCATION_TIMEZONES = {
 
 SIM_SIZE_USD = 5.0
 
+# Per-location, per-mode ECMWF forecast bias correction.
+# Convention: bias = (expected_actual − ecmwf_forecast).
+#   Positive → ECMWF runs cold (actual warmer) → shift bucket selection up.
+#   Negative → ECMWF runs warm (actual cooler) → shift bucket selection down.
+#
+# STALE — May 2026 ECMWF-IFS-vs-ERA5 backtest, do not extend.
+# Live overrides via _load_live_bias() are authoritative for any cell with
+# ≥3 verified samples in the last 45 days.
+FORECAST_BIAS: dict[str, dict[str, float]] = {
+    #                max    min
+    'new_york': {'max': +0.8, 'min': -0.1},
+    'dallas':   {'max': +0.8, 'min':  0.0},
+    'atlanta':  {'max': +1.1, 'min':  0.0},
+}
+
+# Frozen snapshot of static cells so per-trade telemetry can distinguish
+# `source=static` from `source=live` after the live loader merges into FORECAST_BIAS.
+_STATIC_BIAS_KEYS: set[tuple[str, str]] = {
+    (loc, mode) for loc, modes in FORECAST_BIAS.items() for mode in modes
+}
+
+# Populated per main() call by _load_live_bias(). Per-cell EWMA sample count for telemetry.
+LIVE_BIAS_N: dict[str, dict[str, int]] = {}
+
+
+def _load_live_bias(session, min_samples: int = 3, days_back: int = 45) -> dict:
+    """Return EWMA(actual − forecast) per (location_id, mode) from resolved outcomes.
+
+    Uses a 7-day half-life so recent forecast error dominates seasonal drift.
+    Only cells with ≥ min_samples resolved days are included; others keep
+    the static value (or 0 if not in FORECAST_BIAS).
+
+    Returns: {location_id: {mode: (bias_degrees, n_samples)}}
+    """
+    from sqlalchemy import text
+    sql = text(f"""
+        WITH latest_per_date AS (
+            SELECT DISTINCT ON (location_id, mode, DATE(peak_time))
+                location_id, mode, forecast_temp, DATE(peak_time) AS fdate
+            FROM forecasts
+            WHERE peak_time > NOW() - INTERVAL '{days_back} days'
+            ORDER BY location_id, mode, DATE(peak_time), ecmwf_run DESC
+        ),
+        weighted AS (
+            SELECT f.location_id, f.mode,
+                   EXP(-LN(2) * EXTRACT(EPOCH FROM (NOW() - f.fdate)) / 604800.0) AS w,
+                   (CASE WHEN f.mode = 'max' THEN o.actual_max_temp
+                         ELSE o.actual_min_temp END - f.forecast_temp) AS err
+            FROM latest_per_date f
+            JOIN outcomes o ON f.location_id = o.location_id AND f.fdate = DATE(o.date)
+            WHERE o.verified = TRUE
+        )
+        SELECT location_id, mode,
+               SUM(w * err) / SUM(w) AS mean_bias,
+               COUNT(*) AS n
+        FROM weighted
+        GROUP BY location_id, mode
+        HAVING COUNT(*) >= :min_samples
+    """)
+    rows = session.execute(sql, {'min_samples': min_samples}).fetchall()
+    live: dict = {}
+    for loc, mode, bias, n in rows:
+        live.setdefault(loc, {})[mode] = (round(float(bias), 1), int(n))
+    return live
+
 
 # ── Gamma API helpers ──────────────────────────────────────────────────────────
 
@@ -181,29 +246,13 @@ def parse_temp_range(question: str) -> tuple[float | None, float | None]:
 def classify_markets(
     markets: list[dict],
     forecast_temp: float,
-    lower_band: float,
-    upper_band: float,
 ) -> dict:
     """
-    Classify markets into lower-tail, upper-tail, and predicted buckets.
-
-    lower tail  → high < lower_band  (i.e. resolves YES only if temp is below our floor)
-    upper tail  → low  > upper_band  (i.e. resolves YES only if temp is above our ceiling)
-    predicted   → range straddles forecast_temp
-
-    Returns lists for tail markets so we capture every bucket outside the band —
-    useful when markets use single-degree buckets (Hong Kong style).
-    The 'best_lower' / 'best_upper' entries are the single highest-YES market on
-    each side (most price-informative for CLOB recording).
+    Rank markets by midpoint distance to forecast; return all candidates plus
+    the top-2 closest. Open-ended markets (above/below X) use the bound as the
+    midpoint. Markets that don't parse to a temperature are skipped.
     """
-    result: dict = {
-        'lower': None,          # best single lower-tail market
-        'upper': None,          # best single upper-tail market
-        'predicted': None,
-        'lower_all': [],        # all lower-tail markets
-        'upper_all': [],        # all upper-tail markets
-        'in_band': [],          # buckets whose range overlaps [lower_band, upper_band]
-    }
+    candidates = []
 
     for mkt in markets:
         question = mkt.get('question', '')
@@ -217,43 +266,24 @@ def classify_markets(
         except Exception:
             yes_p = 0.0
 
-        # Single-degree exact bucket (low == high)
-        if low is not None and high is not None and low == high:
-            v = low
-            if v < lower_band:
-                result['lower_all'].append(mkt)
-            elif v > upper_band:
-                result['upper_all'].append(mkt)
-            elif low <= forecast_temp <= high or abs(v - forecast_temp) < 0.6:
-                result['predicted'] = mkt
-            if lower_band <= v <= upper_band:
-                result['in_band'].append(mkt)
-            continue
+        if low is not None and high is not None:
+            midpoint = (low + high) / 2.0
+        elif low is not None:
+            midpoint = low
+        else:
+            midpoint = high
 
-        # Range buckets and tail markers
-        if high is not None and (low is None or low < 0) and high <= lower_band:
-            result['lower_all'].append(mkt)
-        elif low is not None and (high is None or high > 999) and low >= upper_band:
-            result['upper_all'].append(mkt)
-            
-        eff_low = low if low is not None else float('-inf')
-        eff_high = high if high is not None else float('inf')
-        
-        if eff_low <= forecast_temp <= eff_high:
-            result['predicted'] = mkt
-            
-        if eff_low <= upper_band and eff_high >= lower_band:
-            result['in_band'].append(mkt)
+        candidates.append({
+            'market':   mkt,
+            'question': question,
+            'range':    (low, high),
+            'midpoint': midpoint,
+            'distance': abs(midpoint - forecast_temp),
+            'yes_price': yes_p,
+        })
 
-    # Pick the most price-informative (highest YES price) market from each tail list
-    if result['lower_all']:
-        result['lower'] = max(result['lower_all'],
-                              key=lambda m: float(json.loads(m.get('outcomePrices', '[0]') or '[0]')[0]))
-    if result['upper_all']:
-        result['upper'] = max(result['upper_all'],
-                              key=lambda m: float(json.loads(m.get('outcomePrices', '[0]') or '[0]')[0]))
-
-    return result
+    candidates.sort(key=lambda x: x['distance'])
+    return {'candidates': candidates, 'top2': candidates[:2]}
 
 
 # ── Price / book helpers ───────────────────────────────────────────────────────
@@ -298,186 +328,148 @@ def clob_no_token(market: dict | None) -> str | None:
 
 # ── Main recording logic ───────────────────────────────────────────────────────
 
+ENTRY_WINDOW_OPEN_H  = 42     # Earliest hours-before-peak the bot will trade
+ENTRY_WINDOW_CLOSE_H = 18     # Latest hours-before-peak the bot will trade
+
+
 def record_dry_run(forecast: dict, session) -> None:
     """
-    Discover the Polymarket weather market for the date corresponding to the
-    ECMWF 36h forecast valid time, record NO-side CLOB price + volume for both
-    tail markets, and persist simulated NO bets.
-
-    Strategy: sell NO on both ±1°C tails. If the forecast is correct, both
-    markets resolve NO (we win both). If forecast is wrong by >1°C in one
-    direction, that tail's NO loses but the other wins — partial hedge.
+    Spec: forecast → top-2 closest market buckets by midpoint distance →
+    place YES on BOTH legs when current time is within [peak - 36h, peak - 30h].
     """
     location_id = forecast['location_id']
     mode = forecast.get('mode', 'max')
     slug = LOCATION_SLUGS.get(location_id, location_id.replace('_', '-'))
     units_label = '°F' if forecast['units'] == 'fahrenheit' else '°C'
 
-    # ── Derive the target market date ─────────────────────────────────────────
     tz_name = LOCATION_TIMEZONES.get(location_id, 'UTC')
-    now_local = datetime.datetime.now(datetime.timezone.utc).astimezone(ZoneInfo(tz_name))
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    now_local = now_utc.astimezone(ZoneInfo(tz_name))
     target_date = (now_local + datetime.timedelta(days=1)).date()
+    hours_to_peak: float | None = None
 
-    print(f"\n📊 {forecast['name']} ({mode.upper()}): forecast={forecast['forecast_temp']}{units_label}  "
-          f"band=[{forecast['lower_band']}, {forecast['upper_band']}]")
-    print(f"   Target market: {target_date} ({tz_name})")
+    # ── Entry-window gate ─────────────────────────────────────────────────────
+    peak_time = forecast.get('peak_time')
+    if peak_time is None:
+        print(f"\n📊 {forecast['name']} ({mode.upper()}): peak_time missing — skip")
+        return
+    try:
+        if peak_time.tzinfo is None:
+            peak_utc = peak_time.replace(tzinfo=datetime.timezone.utc)
+        else:
+            peak_utc = peak_time.astimezone(datetime.timezone.utc)
+        entry_open  = peak_utc - datetime.timedelta(hours=ENTRY_WINDOW_OPEN_H)
+        entry_close = peak_utc - datetime.timedelta(hours=ENTRY_WINDOW_CLOSE_H)
+        peak_local = peak_utc.astimezone(ZoneInfo(tz_name))
+
+        print(f"\n📊 {forecast['name']} ({mode.upper()}): forecast={forecast['forecast_temp']}{units_label}  "
+              f"peak={peak_local.strftime('%Y-%m-%d %H:%M %Z')}")
+        print(f"   Entry window: {entry_open.astimezone(ZoneInfo(tz_name)).strftime('%Y-%m-%d %H:%M %Z')} "
+              f"→ {entry_close.astimezone(ZoneInfo(tz_name)).strftime('%Y-%m-%d %H:%M %Z')}")
+
+        hours_to_peak = (peak_utc - now_utc).total_seconds() / 3600.0
+        if now_utc < entry_open or now_utc >= entry_close:
+            print(f"   ⏳ Outside entry window (currently {hours_to_peak:+.1f}h to peak) — skip")
+            return
+    except Exception as exc:
+        print(f"   ❌ {location_id}/{mode}: entry-gate computation failed: {exc!r}")
+        return
 
     markets = fetch_event_markets(slug, target_date, mode)
     if not markets:
         print(f"   ⚠️  No Polymarket markets found for {location_id} on {target_date}")
         return
 
-    tails = classify_markets(
-        markets,
-        float(forecast['forecast_temp']),
-        float(forecast['lower_band']),
-        float(forecast['upper_band']),
-    )
+    raw_temp = float(forecast['forecast_temp'])
+    bias = FORECAST_BIAS.get(location_id, {}).get(mode, 0.0)
+    corrected_temp = raw_temp + bias
+    units_label_inner = '°F' if forecast['units'] == 'fahrenheit' else '°C'
+    if mode in LIVE_BIAS_N.get(location_id, {}):
+        source = f"live(n={LIVE_BIAS_N[location_id][mode]})"
+    elif (location_id, mode) in _STATIC_BIAS_KEYS:
+        source = "static"
+    else:
+        source = "none"
+    print(f"   📐 Bias: raw={raw_temp:.1f}{units_label_inner} "
+          f"applied={bias:+.1f}{units_label_inner} "
+          f"corrected={corrected_temp:.1f}{units_label_inner} "
+          f"({location_id}/{mode}, source={source})")
+    classified = classify_markets(markets, corrected_temp)
+    candidates = classified['candidates']
+    top2 = classified['top2']
 
-    if not tails['lower'] and not tails['upper'] and not tails['predicted']:
-        print(f"   ⚠️  Markets exist but none classify into lower/predicted/upper")
-        print(f"        Sample questions: {[m.get('question','')[:60] for m in markets[:4]]}")
+    if not candidates:
+        print(f"   ⚠️  No markets parsed to a temperature bucket")
         return
 
-    lower_yes, lower_no = extract_prices(tails['lower'])
-    pred_yes,  pred_no  = extract_prices(tails['predicted'])
-    upper_yes, upper_no = extract_prices(tails['upper'])
+    if len(top2) < 2:
+        print(f"   ⚠️  Only {len(top2)} candidate(s) parsed — need 2 for dual-bucket — skip")
+        return
 
-    # ── Fetch CLOB NO data once per best tail market ───────────────────────────
-    lower_token_no = clob_no_token(tails['lower'])
-    upper_token_no = clob_no_token(tails['upper'])
-    lower_clob: dict = {}
-    upper_clob: dict = {}
+    print(f"   ℹ️  Found {len(candidates)} markets; top 2 closest to forecast:")
+    for c in candidates:
+        marker = '➡️' if c in top2 else '  '
+        rng = c['range']
+        rng_label = f"[{rng[0]}, {rng[1]}]" if rng[0] is not None and rng[1] is not None else (
+            f"≤{rng[1]}" if rng[0] is None else f"≥{rng[0]}"
+        )
+        print(f"   {marker} d={c['distance']:.2f}° mid={c['midpoint']} {rng_label}  "
+              f"q={c['question'][:50]}")
 
-    if lower_token_no:
-        lower_clob = get_no_market_data(lower_token_no, tails['lower'])
-        print(f"   📈 LOWER tail NO  ask={lower_clob.get('best_ask')}  "
-              f"bid={lower_clob.get('best_bid')}  vol_24h={lower_clob.get('volume_24h')}  "
-              f"q={tails['lower'].get('question','')[:60]}")
-
-    if upper_token_no:
-        upper_clob = get_no_market_data(upper_token_no, tails['upper'])
-        print(f"   📈 UPPER tail NO  ask={upper_clob.get('best_ask')}  "
-              f"bid={upper_clob.get('best_bid')}  vol_24h={upper_clob.get('volume_24h')}  "
-              f"q={tails['upper'].get('question','')[:60]}")
-
-    for side in ('lower', 'upper'):
-        for mkt in tails.get(f'{side}_all', []):
-            yes_p, no_p = extract_prices(mkt)
-            print(f"      {side} bucket: YES={yes_p:.4f}  NO={no_p:.4f}  "
-                  f"{mkt.get('question','')[:60]}")
-
-    # ── Persist MarketState summary row ───────────────────────────────────────
-    # flush() after add so state.id is available for MarketBucket FK
-    raw_book = {
-        'lower_no_best': {**lower_clob, 'question': tails['lower'].get('question', '') if tails['lower'] else ''},
-        'upper_no_best': {**upper_clob, 'question': tails['upper'].get('question', '') if tails['upper'] else ''},
-    }
-    state = MarketState(
-        forecast_id=forecast.get('db_id'),
-        location_id=location_id,
-        mode=mode,
-        market_date=target_date,
-        lower_yes_price=lower_yes,
-        lower_no_price=lower_no,
-        lower_clob_token_no=lower_token_no,
-        lower_no_best_ask=lower_clob.get('best_ask'),
-        lower_no_best_bid=lower_clob.get('best_bid'),
-        lower_no_volume_24h=lower_clob.get('volume_24h'),
-        predicted_yes_price=pred_yes,
-        predicted_no_price=pred_no,
-        upper_yes_price=upper_yes,
-        upper_no_price=upper_no,
-        upper_clob_token_no=upper_token_no,
-        upper_no_best_ask=upper_clob.get('best_ask'),
-        upper_no_best_bid=upper_clob.get('best_bid'),
-        upper_no_volume_24h=upper_clob.get('volume_24h'),
-        order_book_depth=raw_book,
-    )
-    session.add(state)
-    session.flush()  # populate state.id before creating child bucket rows
-
-    # ── Persist MarketBucket rows — one per temperature bucket per scan ────────
-    # lower/upper: all tail markets from classify_markets; predicted: single best.
-    for bucket_type in ('lower', 'upper', 'predicted'):
-        if bucket_type == 'predicted':
-            all_mkts = [tails['predicted']] if tails['predicted'] else []
-        else:
-            all_mkts = tails.get(f'{bucket_type}_all', [])
-            if not all_mkts and tails[bucket_type]:
-                all_mkts = [tails[bucket_type]]
-
-        best_mkt  = tails[bucket_type]
-        clob_data = lower_clob if bucket_type == 'lower' else (
-                    upper_clob if bucket_type == 'upper' else {})
-
-        for mkt in all_mkts:
-            yes_p, no_p = extract_prices(mkt)
-            is_best     = (mkt is best_mkt)
-            bucket = MarketBucket(
-                market_state_id=state.id,
-                location_id=location_id,
-                market_date=target_date,
-                bucket_type=bucket_type,
-                is_best=is_best,
-                question_text=mkt.get('question', '')[:512],
-                clob_token_yes=clob_yes_token(mkt),
-                clob_token_no=clob_no_token(mkt),
-                yes_price=yes_p,
-                no_price=no_p,
-            )
-            if is_best and clob_data:
-                bucket.no_best_ask   = clob_data.get('best_ask')
-                bucket.no_best_bid   = clob_data.get('best_bid')
-                bucket.no_volume_24h = clob_data.get('volume_24h')
-            session.add(bucket)
-
-    # ── Simulate YES bets on in-band buckets ──────────────────────────────────────
-    YES_PRICE_CAP = 0.30
-
-    for mkt in tails['in_band']:
+    # ── Pre-fetch tokens + asks for both legs, then gate as a pair ────────────
+    legs = []
+    for idx, cand in enumerate(top2):
+        mkt = cand['market']
         tok_yes = clob_yes_token(mkt)
         if not tok_yes:
-            continue
+            print(f"   ❌ Leg {idx+1}: no YES token — abort pair  q={mkt.get('question','')[:50]}")
+            return
 
-        # De-duplicate: skip if a YES trade for this token+date already recorded
         existing = session.query(TradeSimulation).filter_by(
             location_id=location_id,
             market_date=target_date,
             clob_token_id=tok_yes,
             order_type='YES',
         ).first()
-        if existing:
-            print(f"   ⏭️  Already placed YES for {mkt.get('question','')[:50]}")
-            continue
 
         yes_ask = get_yes_ask(tok_yes)
         if yes_ask is None:
-            print(f"   ⚠️  Could not fetch YES ask for {mkt.get('question','')[:50]}")
+            print(f"   ❌ Leg {idx+1}: no YES ask — abort pair  q={mkt.get('question','')[:50]}")
+            return
+
+        legs.append({
+            'idx':      idx + 1,
+            'cand':     cand,
+            'mkt':      mkt,
+            'tok_yes':  tok_yes,
+            'yes_ask':  yes_ask,
+            'existing': existing,
+        })
+
+    # Both legs pass — record them (skipping any that are already on the book)
+    for leg in legs:
+        if leg['existing']:
+            print(f"   ⏭️  Leg {leg['idx']}: already placed YES  q={leg['mkt'].get('question','')[:50]}")
             continue
 
-        if yes_ask >= YES_PRICE_CAP:
-            print(f"   ⏸️  YES ask={yes_ask:.3f} ≥ {YES_PRICE_CAP} — retry next hour  "
-                  f"q={mkt.get('question','')[:50]}")
-            continue
-
-        payout = round(SIM_SIZE_USD / yes_ask, 2)
+        payout = round(SIM_SIZE_USD / leg['yes_ask'], 2)
         sim = TradeSimulation(
             forecast_id=forecast.get('db_id'),
             location_id=location_id,
             mode=mode,
             market_date=target_date,
-            clob_token_id=tok_yes,
-            question_text=mkt.get('question', '')[:512],
-            market_side='in_band',
+            clob_token_id=leg['tok_yes'],
+            question_text=leg['mkt'].get('question', '')[:512],
+            market_side='top2_closest',
             order_type='YES',
-            price=yes_ask,
+            price=leg['yes_ask'],
             size=SIM_SIZE_USD,
+            hours_to_peak=round(hours_to_peak, 2),
             simulated_pnl=None,
         )
         session.add(sim)
-        print(f"   📝 Sim YES in-band: ask={yes_ask:.3f}  cost=${SIM_SIZE_USD:.2f}  "
-              f"payout=${payout:.2f} if wins  q={mkt.get('question','')[:50]}")
+        print(f"   📝 Leg {leg['idx']}: distance={leg['cand']['distance']:.2f}° ask=${leg['yes_ask']:.3f} "
+              f"cost=${SIM_SIZE_USD:.2f} payout=${payout:.2f}  q={leg['mkt'].get('question','')[:50]}")
 
 
 def main(pending_only: bool = False) -> None:
@@ -485,7 +477,14 @@ def main(pending_only: bool = False) -> None:
     print("Polymarket Dry Run — Market State Recorder")
     print("=" * 70)
 
-    session = init_database(auto_migrate=True)
+    session = init_database(auto_migrate=not pending_only)
+
+    # Refresh bias from resolved outcomes — live values override static fallback.
+    # Sample counts are stashed in LIVE_BIAS_N for per-trade telemetry.
+    for loc, modes in _load_live_bias(session).items():
+        for mode, (bias, n) in modes.items():
+            FORECAST_BIAS.setdefault(loc, {})[mode] = bias
+            LIVE_BIAS_N.setdefault(loc, {})[mode] = n
 
     # Load the most recent forecast for each location
     from sqlalchemy import func
@@ -533,11 +532,9 @@ def main(pending_only: bool = False) -> None:
             'mode': fc.mode,
             'name': fc.location_name,
             'forecast_temp': float(fc.forecast_temp),
-            'lower_band': float(fc.lower_band),
-            'upper_band': float(fc.upper_band),
             'units': fc.units,
             'ecmwf_run': fc.ecmwf_run,
-            'horizon_hours': fc.horizon_hours,
+            'peak_time': fc.peak_time,
         }
         record_dry_run(forecast_dict, session)
 
