@@ -6,8 +6,6 @@ export interface BotConfig {
   exit_threshold: number;
   max_trades_per_run: number;
   max_open_positions: number;
-  min_hours_to_resolution: number;
-  max_hours_to_resolution: number;
   locations: string;
   polymarket_private_key: string;
   polymarket_proxy_wallet_address: string;
@@ -22,9 +20,7 @@ export const DEFAULT_CONFIG: BotConfig = {
   exit_threshold: 0.45,
   max_trades_per_run: 5,
   max_open_positions: 10,
-  min_hours_to_resolution: 18,
-  max_hours_to_resolution: 20,
-  locations: "nyc,chicago,miami,dallas,seattle,atlanta",
+  locations: "nyc,chicago,miami,dallas,seattle,atlanta,houston,denver,los-angeles,san-francisco,austin",
   polymarket_private_key: "",
   polymarket_proxy_wallet_address: "",
   use_proxy_wallet: false,
@@ -55,14 +51,6 @@ export async function loadConfig(): Promise<BotConfig> {
       process.env.MAX_OPEN_POSITIONS,
       DEFAULT_CONFIG.max_open_positions
     ),
-    min_hours_to_resolution: parseNumber(
-      process.env.MIN_HOURS_TO_RESOLUTION,
-      DEFAULT_CONFIG.min_hours_to_resolution
-    ),
-    max_hours_to_resolution: parseNumber(
-      process.env.MAX_HOURS_TO_RESOLUTION,
-      DEFAULT_CONFIG.max_hours_to_resolution
-    ),
     locations: process.env.LOCATIONS ?? DEFAULT_CONFIG.locations,
     polymarket_private_key: process.env.POLYMARKET_PRIVATE_KEY || process.env.POLY_PRIVATE_KEY || "",
     polymarket_proxy_wallet_address:
@@ -71,6 +59,7 @@ export async function loadConfig(): Promise<BotConfig> {
       (process.env.USE_PROXY_WALLET ?? "").toLowerCase() === "true",
     signature_type: (() => {
       const raw = process.env.SIGNATURE_TYPE ?? "";
+      if (raw === "0") return 0 as SignatureType;
       if (raw === "1") return 1 as SignatureType;
       if (raw === "2") return 2 as SignatureType;
       return (process.env.USE_PROXY_WALLET ?? "").toLowerCase() === "true"
