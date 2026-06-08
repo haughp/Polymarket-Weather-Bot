@@ -13,6 +13,8 @@ dist/
 
 # Paper / simulation state (local)
 simulation.json
+# Per-city shadow→live promotion state — regenerated nightly by promote_cities.py
+city_status.json
 
 # Logs
 *.log

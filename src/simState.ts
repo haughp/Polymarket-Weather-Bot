@@ -39,6 +39,7 @@ export interface Trade {
   our_prob?: number;
   location?: string;
   date?: string;
+  forecast_temp?: number;
 }
 
 export interface SimulationState {
@@ -50,6 +51,32 @@ export interface SimulationState {
   wins: number;
   losses: number;
   peak_balance: number;
+}
+
+export interface SignalSnapshot {
+  snapshot_key:  string;
+  snapped_at:    string;
+  city:          string;
+  mode:          "highest" | "lowest";
+  market_date:   string;
+  hours_to_peak: number;
+  nws_forecast:  number;
+  adj_forecast:  number;
+  bucket1_range: string;
+  bucket1_price: number;
+  bucket2_range: string;
+  bucket2_price: number;
+  entered:       boolean;
+  /** "live" = real-money eligible; "shadow" = dry calibration only (see cityStatus.ts) */
+  status?:       "live" | "shadow";
+  /** True when the city would have entered had it been live (shadow accounting) */
+  would_enter?:  boolean;
+}
+
+const SNAPSHOTS_FILE = path.resolve(__dirname, "..", "snapshots.jsonl");
+
+export async function appendSnapshot(snap: SignalSnapshot): Promise<void> {
+  await fs.appendFile(SNAPSHOTS_FILE, JSON.stringify(snap) + "\n", "utf8");
 }
 
 export async function loadSim(): Promise<SimulationState> {

@@ -1,7 +1,7 @@
-import { buyYesLimit, getClobClient, sellYesLimit } from "./clob";
+import { buyYesFok, fetchAskPrice, getClobClient, sellYesLimit } from "./clob";
 import { BotConfig, getActiveLocations } from "./config";
 import { badge, C, divider, info, ok, panel, progressBar, skip, stat, warn } from "./colors";
-import { DailyForecasts, LOCATIONS, getForecast } from "./nws";
+import { DailyForecasts, FORECAST_BIAS, LOCATIONS, getForecast } from "./nws";
 import { parseTempRange } from "./parsing";
 import {
   PolymarketEvent,
@@ -11,17 +11,21 @@ import {
   getMarketResolution,
   getYesTokenId
 } from "./polymarket";
-import { Position, Trade, loadSim, saveSim } from "./simState";
-import { MONTHS } from "./time";
-import type { ClobClient } from "@polymarket/clob-client";
+import { Position, Trade, SignalSnapshot, loadSim, saveSim, appendSnapshot } from "./simState";
+import { isLive, loadCityStatus } from "./cityStatus";
+import { tomorrowInTz } from "./time";
+import type { ClobClient } from "@polymarket/clob-client-v2";
 
 const FIXED_POSITION_SIZE = 2.0;
 
-// ECMWF ±1°C confidence band converted to Fahrenheit
-const CONFIDENCE_BAND_F = 1.8;
-
-// Maximum YES price to enter on any bucket (including adjacent ones)
-const DUAL_BUCKET_MAX_PRICE = 0.35;
+// Minimum YES price — filter out near-zero (effectively-resolved) markets
+// Minimum YES price — filter out near-zero (effectively-resolved) markets
+// Raised from $0.05 to $0.12. At 36h out, if the market prices a bucket under 12¢, 
+// smart money fundamentally disagrees with our model. Do not catch falling knives.
+const MIN_YES_PRICE = 0.12;
+// Entry window relative to peak temperature time
+const PEAK_ENTRY_OPEN_H = 36;   // start entry window 36h before forecast peak
+const PEAK_ENTRY_CLOSE_H = 30;  // close entry window 30h before forecast peak
 
 export type TradeMode = "dry-run" | "paper" | "execute";
 
@@ -58,18 +62,6 @@ function shortQuestion(question: string, max = 62): string {
   return question.length > max ? `${question.slice(0, max - 1)}…` : question;
 }
 
-function bandOverlap(
-  rangeMin: number,
-  rangeMax: number,
-  bandMin: number,
-  bandMax: number
-): number {
-  const lo = Math.max(rangeMin, bandMin);
-  const hi = Math.min(rangeMax, bandMax);
-  if (hi <= lo) return 0;
-  const bandWidth = bandMax - bandMin;
-  return bandWidth > 0 ? (hi - lo) / bandWidth : 0;
-}
 
 export async function showPositions(): Promise<void> {
   const sim = await loadSim();
@@ -157,6 +149,9 @@ export async function run(options: RunOptions): Promise<void> {
   let tradesExecuted = 0;
   let exitsFound = 0;
 
+  // Per-city live/shadow gating. `null` => no status file => grandfathered-live fallback.
+  const cityStatus = await loadCityStatus();
+
   let clob: ClobClient | undefined;
   if (mode === "execute") {
     try {
@@ -188,7 +183,7 @@ export async function run(options: RunOptions): Promise<void> {
           stat("Position size", `$${FIXED_POSITION_SIZE.toFixed(2)} Fixed`, "blue"),
           stat("Max open cap", `${config.max_open_positions} positions`, "yellow"),
           stat("Entry threshold", `< $${config.entry_threshold.toFixed(2)}`, "green"),
-          stat("Exit threshold", `>= $${config.exit_threshold.toFixed(2)}`, "red"),
+          stat("Exit strategy", "Hold to resolution", "green"),
           stat("Trade record", `${sim.wins} wins / ${sim.losses} losses`, "yellow")
         ],
         modeTone(mode)
@@ -211,12 +206,19 @@ export async function run(options: RunOptions): Promise<void> {
     if (rawPrice == null || isExpired) {
       resolvedWin = await getMarketResolution(mid);
       // Wait until Polymarket actually reports a winner before claiming a win or loss
-      if (resolvedWin === null && !isExpired) continue; 
+      if (resolvedWin === null && !isExpired) continue;
     }
 
     const currentPrice = rawPrice ?? 0;
 
-    if (resolvedWin === true || (resolvedWin === null && currentPrice >= config.exit_threshold)) {
+    // Polymarket API often lags official resolution by 12-24h even when outcomePrices
+    // already shows ["1","0"] or ["0","1"]. Use price as a fallback once expired.
+    if (resolvedWin === null && isExpired) {
+      if (currentPrice >= 0.98) resolvedWin = true;
+      else if (currentPrice <= 0.02) resolvedWin = false;
+    }
+
+    if (resolvedWin === true) {
       exitsFound += 1;
       const exitPrice = resolvedWin === true ? 1.0 : currentPrice;
       const pnl = (exitPrice - pos.entry_price) * pos.shares;
@@ -225,7 +227,6 @@ export async function run(options: RunOptions): Promise<void> {
           `Exit Candidate • ${shortQuestion(pos.question, 56)}`,
           [
             stat(resolvedWin !== null ? "Settlement price" : "Current price", `$${exitPrice.toFixed(3)}`, "red"),
-            stat("Exit threshold", `$${config.exit_threshold.toFixed(2)}`, "yellow"),
             stat("Shares", pos.shares.toFixed(1), "blue"),
             stat(
               "Estimated PnL",
@@ -243,18 +244,7 @@ export async function run(options: RunOptions): Promise<void> {
           warn("Missing CLOB token_id for this position — cannot sell on-chain");
           continue;
         }
-        if (resolvedWin === true) {
-          ok("Market resolved YES. Platform will auto-settle.");
-        } else {
-          const sellPx = Math.max(currentPrice - 0.01, 0.01);
-          try {
-            await sellYesLimit(clob, pos.token_id, sellPx, pos.shares);
-            ok("CLOB sell order submitted");
-          } catch (e) {
-            warn(`CLOB sell failed: ${String(e)}`);
-            continue;
-          }
-        }
+        ok("Market resolved YES. Platform will auto-settle.");
         balance += pos.cost + pnl;
         const est = pnl;
         if (est > 0) sim.wins += 1;
@@ -266,6 +256,9 @@ export async function run(options: RunOptions): Promise<void> {
           exit_price: exitPrice,
           pnl: Number(est.toFixed(2)),
           cost: pos.cost,
+          location: pos.location,
+          date: pos.date,
+          forecast_temp: pos.forecast_temp,
           closed_at: new Date().toISOString()
         };
         sim.trades.push(trade);
@@ -282,6 +275,9 @@ export async function run(options: RunOptions): Promise<void> {
           exit_price: exitPrice,
           pnl: Number(pnl.toFixed(2)),
           cost: pos.cost,
+          location: pos.location,
+          date: pos.date,
+          forecast_temp: pos.forecast_temp,
           closed_at: new Date().toISOString()
         };
         sim.trades.push(trade);
@@ -292,7 +288,7 @@ export async function run(options: RunOptions): Promise<void> {
       } else {
         skip("Dry-run — not selling");
       }
-    } else if (resolvedWin === false || (resolvedWin === null && currentPrice <= 0.02)) {
+    } else if (resolvedWin === false || (isExpired && currentPrice <= 0.02)) {
       exitsFound += 1;
       const pnl = -pos.cost;
       console.log(
@@ -303,7 +299,7 @@ export async function run(options: RunOptions): Promise<void> {
             stat("Entry price", `$${pos.entry_price.toFixed(3)}`, "cyan"),
             stat("Shares", pos.shares.toFixed(1), "blue"),
             stat("Realized PnL", `-$${Math.abs(pnl).toFixed(2)}`, "red"),
-            `${C.DIM("Reason")}         ${resolvedWin === false ? "Market resolved NO" : "Price dropped to ≤ $0.02"}`
+            `${C.DIM("Reason")}         ${resolvedWin === false ? "Market resolved NO" : "Expired + price ≤ $0.02"}`
           ],
           "red"
         )
@@ -327,6 +323,9 @@ export async function run(options: RunOptions): Promise<void> {
           exit_price: currentPrice,
           pnl: Number(pnl.toFixed(2)),
           cost: pos.cost,
+          location: pos.location,
+          date: pos.date,
+          forecast_temp: pos.forecast_temp,
           closed_at: new Date().toISOString()
         };
         sim.trades.push(trade);
@@ -341,6 +340,9 @@ export async function run(options: RunOptions): Promise<void> {
           exit_price: currentPrice,
           pnl: Number(pnl.toFixed(2)),
           cost: pos.cost,
+          location: pos.location,
+          date: pos.date,
+          forecast_temp: pos.forecast_temp,
           closed_at: new Date().toISOString()
         };
         sim.trades.push(trade);
@@ -369,18 +371,18 @@ export async function run(options: RunOptions): Promise<void> {
     const forecasts: DailyForecasts = await getForecast(citySlug);
     if (!forecasts || Object.keys(forecasts.max).length === 0) continue;
 
-    // Align with ECMWF bot: strictly trade tomorrow's market only (24-36h alpha window)
-    for (let i = 1; i <= 1; i++) {
-      const date = new Date();
-      date.setDate(date.getDate() + i);
-      const dateStr = date.toISOString().slice(0, 10);
-      const month = MONTHS[date.getMonth()];
-      const day = date.getDate();
-      const year = date.getFullYear();
+    // Align with ECMWF bot: strictly trade tomorrow's market only (24-36h alpha window).
+    // Date is computed in the city's IANA timezone so the NWS lookup key and the Polymarket
+    // slug always agree on which observation day we're trading.
+    {
+      const { dateStr, month, day, year } = tomorrowInTz(locData.tz);
 
       for (const marketMode of ["highest", "lowest"] as const) {
         const forecastTemp = forecasts[marketMode === "highest" ? "max" : "min"][dateStr];
         if (forecastTemp == null) continue;
+
+        const biasOffset = FORECAST_BIAS[citySlug]?.[marketMode] ?? 0;
+        const adjustedForecastTemp = forecastTemp + biasOffset;
 
         const event: PolymarketEvent | null = await getPolymarketEvent(
           citySlug,
@@ -391,37 +393,46 @@ export async function run(options: RunOptions): Promise<void> {
         );
         if (!event) continue;
 
-        // Calculate actual hours left until Polymarket locks trading
-        let hoursLeft = 0;
-        if (event.endDate) {
-          const endDt = new Date(event.endDate);
-          hoursLeft = Math.max(0, (endDt.getTime() - Date.now()) / (1000 * 3600));
-        } else {
-          // Fallback if API doesn't provide endDate: assume 12:00:00 UTC
-          const targetEndDt = new Date(Date.UTC(year, date.getMonth(), day, 12, 0, 0));
-          hoursLeft = Math.max(0, (targetEndDt.getTime() - Date.now()) / (1000 * 3600));
+        // Compute hours to forecast peak/trough
+        const peakTimeStr = forecasts[marketMode === "highest" ? "maxTime" : "minTime"][dateStr];
+        if (!peakTimeStr) {
+          skip(`No forecast peak time available for ${dateStr}`);
+          continue;
         }
+        const peakDt = new Date(peakTimeStr);
+        const hoursToPeak = (peakDt.getTime() - Date.now()) / (1000 * 3600);
+
+        const localFormatter = new Intl.DateTimeFormat('en-US', {
+          hour: '2-digit',
+          minute: '2-digit',
+          hourCycle: 'h23',
+          timeZone: locData.tz
+        });
+        const localPeakStr = localFormatter.format(peakDt);
 
         console.log(
           "\n" +
             panel(
               `${locData.name} • ${dateStr} (${marketMode.toUpperCase()})`,
               [
-                stat(`Forecast ${marketMode}`, `${forecastTemp}°F`, "cyan"),
-                stat("Resolves in", `${hoursLeft.toFixed(0)}h`, (hoursLeft < config.min_hours_to_resolution || hoursLeft > config.max_hours_to_resolution) ? "red" : "green"),
-                stat("Market date", `${month} ${day}, ${year}`, "blue")
+                stat(`Forecast ${marketMode}`, biasOffset !== 0
+                  ? `${forecastTemp}°F → ${adjustedForecastTemp}°F (bias ${biasOffset > 0 ? "+" : ""}${biasOffset}°F)`
+                  : `${forecastTemp}°F`, "cyan"),
+                stat("Peak time", `${localPeakStr} local`, "blue"),
+                stat("Hours to peak", `${hoursToPeak.toFixed(1)}h`,
+                  (hoursToPeak < PEAK_ENTRY_CLOSE_H || hoursToPeak > PEAK_ENTRY_OPEN_H) ? "red" : "green"),
+                stat("Entry window", `${PEAK_ENTRY_CLOSE_H}–${PEAK_ENTRY_OPEN_H}h before peak`, "blue")
               ],
               "blue"
             )
         );
 
-        if (hoursLeft < config.min_hours_to_resolution) {
-          skip(`Resolves in ${hoursLeft.toFixed(0)}h — too close to expiry (<${config.min_hours_to_resolution}h)`);
+        if (hoursToPeak > PEAK_ENTRY_OPEN_H) {
+          skip(`Too early — ${hoursToPeak.toFixed(1)}h to peak (entry opens at ${PEAK_ENTRY_OPEN_H}h)`);
           continue;
         }
-
-        if (hoursLeft > config.max_hours_to_resolution) {
-          skip(`Resolves in ${hoursLeft.toFixed(0)}h — waiting for execution window (≤${config.max_hours_to_resolution}h)`);
+        if (hoursToPeak < PEAK_ENTRY_CLOSE_H) {
+          skip(`Entry window closed — peak in ${hoursToPeak.toFixed(1)}h (window was ${PEAK_ENTRY_CLOSE_H}–${PEAK_ENTRY_OPEN_H}h)`);
           continue;
         }
 
@@ -430,42 +441,141 @@ export async function run(options: RunOptions): Promise<void> {
           question: string;
           price: number;
           range: [number, number];
-          score: number;
+          midpointDistance: number;
         }
 
-        const bandLow  = forecastTemp - CONFIDENCE_BAND_F;
-        const bandHigh = forecastTemp + CONFIDENCE_BAND_F;
-
-        const scoredBuckets: ScoredBucket[] = [];
+        const candidateBuckets: ScoredBucket[] = [];
 
         for (const market of event.markets ?? []) {
           const question = market.question ?? "";
           const rng = parseTempRange(question);
           if (!rng) continue;
 
-          const rMin = rng[0] === -999 ? bandLow - 10 : rng[0];
-          const rMax = rng[1] ===  999 ? bandHigh + 10 : rng[1];
-
-          const score = bandOverlap(rMin, rMax, bandLow, bandHigh);
-          if (score <= 0) continue;
-
           try {
             const pricesStr = market.outcomePrices ?? "[0.5,0.5]";
             const prices = JSON.parse(pricesStr) as number[];
             const yesPrice = Number(prices[0]);
-            if (!isFinite(yesPrice)) continue;
-            if (yesPrice > DUAL_BUCKET_MAX_PRICE) continue;
-            scoredBuckets.push({ market, question, price: yesPrice, range: rng, score });
+            if (!isFinite(yesPrice) || yesPrice < MIN_YES_PRICE) continue;
+
+            let midpoint: number;
+            if (rng[0] === -999) {
+              midpoint = rng[1]; // Use upper boundary as midpoint for "or below" (e.g., 70 for "-999 to 70")
+            } else if (rng[1] === 999) {
+              midpoint = rng[0]; // Use lower boundary as midpoint for "or higher" (e.g., 70 for "70 to 999")
+            } else {
+              midpoint = (rng[0] + rng[1]) / 2;
+            }
+            const midpointDistance = Math.abs(midpoint - adjustedForecastTemp);
+            candidateBuckets.push({ market, question, price: yesPrice, range: rng, midpointDistance });
           } catch {
             continue;
           }
         }
 
-        scoredBuckets.sort((a, b) => b.score - a.score);
-        const topBuckets = scoredBuckets.slice(0, 2);
+        // Sort by midpoint distance (closest to forecast first)
+        candidateBuckets.sort((a, b) => a.midpointDistance - b.midpointDistance);
+        const topBuckets = candidateBuckets.slice(0, 2);
 
-        if (topBuckets.length === 0) {
-          skip(`No bucket within ±${CONFIDENCE_BAND_F}°F of ${forecastTemp}°F at price ≤ $${DUAL_BUCKET_MAX_PRICE}`);
+        if (topBuckets.length < 2) {
+          skip(`Need 2 buckets near ${forecastTemp}°F — found ${topBuckets.length}`);
+          continue;
+        }
+
+        // City-level gate: BOTH top buckets must be in [MIN_YES_PRICE, 0.35] or abort entire city.
+        // Floor is required to ensure we don't catch falling knives if the market strongly disagrees.
+        // Ceiling is 0.35 to ensure positive Expected Value for the dual-entry setup.
+        const DUAL_BUCKET_MIN_PRICE = MIN_YES_PRICE;
+        const DUAL_BUCKET_MAX_PRICE = 0.35;
+        if (topBuckets.some(b => b.price < DUAL_BUCKET_MIN_PRICE || b.price > DUAL_BUCKET_MAX_PRICE)) {
+          const prices = topBuckets.map(b => `$${b.price.toFixed(3)}`).join(", ");
+          skip(`City gate: both markets must be in [$${DUAL_BUCKET_MIN_PRICE}, $${DUAL_BUCKET_MAX_PRICE}] — got [${prices}]`);
+          continue;
+        }
+
+        const _fmtRange = (r: [number, number]): string =>
+          r[0] === -999 ? `le${r[1]}` : r[1] === 999 ? `ge${r[0]}` : `${r[0]}-${r[1]}`;
+        const snapshotKey = `${new Date().toISOString().slice(0, 19)}_${citySlug}_${marketMode}`;
+        let snapEntered = false;
+        const snapData: SignalSnapshot = {
+          snapshot_key:  snapshotKey,
+          snapped_at:    new Date().toISOString(),
+          city:          citySlug,
+          mode:          marketMode,
+          market_date:   dateStr,
+          hours_to_peak: Number(hoursToPeak.toFixed(1)),
+          nws_forecast:  forecastTemp,
+          adj_forecast:  adjustedForecastTemp,
+          bucket1_range: _fmtRange(topBuckets[0].range),
+          bucket1_price: topBuckets[0].price,
+          bucket2_range: _fmtRange(topBuckets[1].range),
+          bucket2_price: topBuckets[1].price,
+          entered:       false,
+        };
+
+        // --- Per-city live/shadow gate ---
+        // Shadow cities are evaluated and snapshotted for calibration but NEVER place real
+        // orders, even under --execute. Only promoted (live) cities reach the CLOB.
+        const cityLive = isLive(citySlug, cityStatus);
+        snapData.status = cityLive ? "live" : "shadow";
+        const willExecute = mode === "execute" && cityLive;
+        const willPaper = mode === "paper" && cityLive;
+
+        // --- Both-buckets Go/No-Go on live CLOB asks (symmetric for highest & lowest) ---
+        // The dual entry is all-or-nothing: fetch BOTH buckets' live asks first; if either
+        // exceeds the ceiling (or can't be priced), abort BOTH. This removes the lone-fill
+        // case where one bucket dropped at the old per-bucket ask>$0.35 re-check while its
+        // sibling filled. Only runs when we can actually price asks (live execute).
+        const askByMarket: Record<string, number> = {};
+        const tokenByMarket: Record<string, string> = {};
+        if (willExecute) {
+          if (!clob) {
+            warn("CLOB client not initialised — skipping live entry for this city");
+            continue;
+          }
+          let dualGo = true;
+          for (const matched of topBuckets) {
+            const tokenId = getYesTokenId(matched.market);
+            if (!tokenId) {
+              skip(`Go/No-Go: a bucket has no CLOB token — aborting dual entry`);
+              dualGo = false;
+              break;
+            }
+            let ask: number;
+            try {
+              ask = await fetchAskPrice(tokenId);
+            } catch (e) {
+              skip(`Go/No-Go: could not price a bucket (${String(e)}) — aborting dual entry`);
+              dualGo = false;
+              break;
+            }
+            if (ask > DUAL_BUCKET_MAX_PRICE) {
+              skip(`Go/No-Go: live ask $${ask.toFixed(3)} > $${DUAL_BUCKET_MAX_PRICE} on a bucket — aborting BOTH`);
+              dualGo = false;
+              break;
+            }
+            askByMarket[matched.market.id] = ask;
+            tokenByMarket[matched.market.id] = tokenId;
+          }
+          if (!dualGo) {
+            snapData.would_enter = false;
+            snapData.entered = false;
+            await appendSnapshot(snapData);
+            continue; // next mode (highest/lowest)
+          }
+        }
+        // Passed Gamma city gate (and live-ask gate when executing) → would enter the pair.
+        snapData.would_enter = true;
+
+        // Guard: if we already hold ≥2 positions for this city/date (from a prior run where
+        // the NWS forecast was different), don't add a 3rd bucket due to forecast drift.
+        const alreadyHeld = Object.values(positions).filter(
+          p => p.location === citySlug && p.date === dateStr
+        );
+        if (alreadyHeld.length >= 2) {
+          skip(`Already hold ${alreadyHeld.length} positions for ${citySlug} ${dateStr} — skipping re-entry`);
+          snapData.would_enter = false;
+          snapData.entered = false;
+          await appendSnapshot(snapData);
           continue;
         }
 
@@ -478,18 +588,19 @@ export async function run(options: RunOptions): Promise<void> {
             panel(
               `Matched Bucket • ${shortQuestion(question, 52)}`,
               [
-                stat(`Forecast ${marketMode}`, `${forecastTemp}°F`, "cyan"),
-                stat("Band", `[${bandLow.toFixed(1)}, ${bandHigh.toFixed(1)}]°F`, "blue"),
-                stat("Overlap score", `${(matched.score * 100).toFixed(0)}%`, "cyan"),
+                stat(`Forecast ${marketMode}`, biasOffset !== 0
+                  ? `${forecastTemp}°F → ${adjustedForecastTemp}°F adj`
+                  : `${forecastTemp}°F`, "cyan"),
+                stat("Distance to adj. forecast", `${matched.midpointDistance.toFixed(1)}°F`, "cyan"),
                 stat("YES price", `$${price.toFixed(3)}`, tone),
-                stat("Entry gate", `≤ $${DUAL_BUCKET_MAX_PRICE.toFixed(2)}`, "green"),
+                stat("Entry gate", `[$${DUAL_BUCKET_MIN_PRICE}, $${DUAL_BUCKET_MAX_PRICE}]`, "green"),
                 `${C.DIM("Market odds")}   ${progressBar(price, 1, 26, tone)}`
               ],
               tone
             )
           );
 
-          // DUAL_BUCKET_MAX_PRICE gate already applied during scoring above.
+          // DUAL_BUCKET_MAX_PRICE gate already applied above.
 
           if (positions[marketId]) {
             skip(`Already in this market`);
@@ -530,24 +641,37 @@ export async function run(options: RunOptions): Promise<void> {
             )
           );
 
-          if (mode === "execute") {
-            const tokenId = getYesTokenId(matched.market);
-            if (!tokenId || !clob) {
-              warn("No clobTokenIds on market — cannot trade this market on CLOB");
+          if (willExecute) {
+            const tokenId = tokenByMarket[marketId];
+            const askPrice = askByMarket[marketId];
+            if (!tokenId || askPrice == null || !clob) {
+              warn("Missing pre-checked ask/token for bucket — skipping leg");
               continue;
             }
-            const limitPx = Math.min(price + 0.03, 0.99);
+            // Both buckets already cleared the Go/No-Go ceiling above; use the pre-fetched ask.
+            // Bid 1¢ above ask to cross the spread; FOK fills immediately or cancels.
+            // createAndPostMarketOrder(BUY) takes amount in USDC, not shares
+            const limitPx = Math.min(askPrice + 0.01, 0.99);
+            const actualShares = Math.floor((positionSize / askPrice) * 100) / 100;
+            let filled = false;
             try {
-              await buyYesLimit(clob, tokenId, limitPx, shares);
-              ok(`CLOB buy order submitted @ limit $${limitPx.toFixed(3)}`);
+              const result = await buyYesFok(clob, tokenId, limitPx, positionSize);
+              filled = result.filled;
+              if (filled) {
+                ok(`CLOB FOK filled @ ask $${askPrice.toFixed(3)} limit $${limitPx.toFixed(3)} (order ${result.orderId.slice(0, 10)}…)`);
+              } else {
+                warn(`CLOB FOK cancelled post-Go/No-Go — ask raced after precheck on ${shortQuestion(question, 40)}. No position recorded; sibling leg may have filled (residual lone-fill risk — review).`);
+                continue;
+              }
             } catch (e) {
               warn(`CLOB buy failed: ${String(e)}`);
               continue;
             }
+            // Record position only after confirmed fill
             const pos: Position = {
               question,
-              entry_price: price,
-              shares,
+              entry_price: askPrice,
+              shares: actualShares,
               cost: positionSize,
               date: dateStr,
               location: citySlug,
@@ -560,15 +684,16 @@ export async function run(options: RunOptions): Promise<void> {
             const trade: Trade = {
               type: "entry",
               question,
-              entry_price: price,
-              shares,
+              entry_price: askPrice,
+              shares: actualShares,
               cost: positionSize,
               opened_at: pos.opened_at
             };
             sim.trades.push(trade);
             tradesExecuted += 1;
+            snapEntered = true;
             balance -= positionSize;
-          } else if (mode === "paper") {
+          } else if (willPaper) {
             balance -= positionSize;
             const pos: Position = {
               question,
@@ -592,14 +717,21 @@ export async function run(options: RunOptions): Promise<void> {
             };
             sim.trades.push(trade);
             tradesExecuted += 1;
+            snapEntered = true;
             ok(
               `Position opened — $${positionSize.toFixed(2)} deducted from balance`
             );
           } else {
-            skip("Dry-run — not buying");
+            if (!cityLive && mode === "execute") {
+              skip(`Shadow city (status=shadow) — calibration only, no real orders`);
+            } else {
+              skip("Dry-run — not buying");
+            }
             tradesExecuted += 1;
           }
         }  // end topBuckets loop
+        snapData.entered = snapEntered;
+        await appendSnapshot(snapData);
       } // end mode loop (highest/lowest)
     }
   }
