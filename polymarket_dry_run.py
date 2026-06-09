@@ -76,9 +76,12 @@ SIM_SIZE_USD = 5.0
 #   Positive → ECMWF runs cold (actual warmer) → shift bucket selection up.
 #   Negative → ECMWF runs warm (actual cooler) → shift bucket selection down.
 #
-# STALE — May 2026 ECMWF-IFS-vs-ERA5 backtest, do not extend.
+# STALE — May 2026 ECMWF-IFS-vs-ERA5 backtest, do not extend. Cold-start fallback only.
 # Live overrides via _load_live_bias() are authoritative for any cell with
-# ≥3 verified samples in the last 45 days.
+# ≥5 verified samples in the last 45 days. As of the 2026-06 IEM migration those
+# live values are the median forecast-vs-airport-METAR error (the source Polymarket
+# settles on), not ERA5 — so this static dict is now only used before a city has 5
+# resolved samples.
 FORECAST_BIAS: dict[str, dict[str, float]] = {
     #                max    min
     'new_york': {'max': +0.8, 'min': -0.1},
@@ -96,12 +99,19 @@ _STATIC_BIAS_KEYS: set[tuple[str, str]] = {
 LIVE_BIAS_N: dict[str, dict[str, int]] = {}
 
 
-def _load_live_bias(session, min_samples: int = 3, days_back: int = 45) -> dict:
-    """Return EWMA(actual − forecast) per (location_id, mode) from resolved outcomes.
+def _load_live_bias(session, min_samples: int = 5, days_back: int = 45) -> dict:
+    """Return median(actual − forecast) per (location_id, mode) from resolved outcomes.
 
-    Uses a 7-day half-life so recent forecast error dominates seasonal drift.
-    Only cells with ≥ min_samples resolved days are included; others keep
-    the static value (or 0 if not in FORECAST_BIAS).
+    Forecast bias is a slowly-varying *level*, not a fast signal, so a robust median
+    over the full window beats a recency-weighted mean: the median ignores the
+    occasional bad-reading outlier instead of letting it swing the correction by a
+    whole bucket. Only cells with ≥ min_samples resolved days are included; others
+    keep the static value (or 0 if not in FORECAST_BIAS).
+
+    NOTE: ground truth comes from `outcomes`, which (post-2026-06 migration) is the
+    airport-METAR reading Polymarket settles on — see outcome_backfiller.IEM_STATIONS.
+    For IEM_EXCLUDED cities (hong_kong, shenzhen) `outcomes` is still ERA5, so their
+    bias remains untrustworthy until a proper source is wired in.
 
     Returns: {location_id: {mode: (bias_degrees, n_samples)}}
     """
@@ -114,9 +124,8 @@ def _load_live_bias(session, min_samples: int = 3, days_back: int = 45) -> dict:
             WHERE peak_time > NOW() - INTERVAL '{days_back} days'
             ORDER BY location_id, mode, DATE(peak_time), ecmwf_run DESC
         ),
-        weighted AS (
+        errors AS (
             SELECT f.location_id, f.mode,
-                   EXP(-LN(2) * EXTRACT(EPOCH FROM (NOW() - f.fdate)) / 604800.0) AS w,
                    (CASE WHEN f.mode = 'max' THEN o.actual_max_temp
                          ELSE o.actual_min_temp END - f.forecast_temp) AS err
             FROM latest_per_date f
@@ -124,9 +133,9 @@ def _load_live_bias(session, min_samples: int = 3, days_back: int = 45) -> dict:
             WHERE o.verified = TRUE
         )
         SELECT location_id, mode,
-               SUM(w * err) / SUM(w) AS mean_bias,
+               PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY err) AS median_bias,
                COUNT(*) AS n
-        FROM weighted
+        FROM errors
         GROUP BY location_id, mode
         HAVING COUNT(*) >= :min_samples
     """)

@@ -28,6 +28,50 @@ US_GHCND_STATIONS = {
     'austin':   'USW00013958',   # Austin-Bergstrom Intl
 }
 
+IEM_URL = "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py"
+
+# IEM ASOS airport stations — the ICAO code each Polymarket market names as its
+# resolution station (read from the market description / wunderground resolutionSource
+# URL, not guessed). Daily extremes are derived from hourly METAR temps grouped by the
+# local calendar date, which matches Weather Underground's settlement method.
+#
+# Validated 2026-06-08 over 30 days: iem-in-Polymarket-band 89-100% for 19/20 cities
+# vs ERA5 7-68%. See validate_outcome_source.py.
+#
+# EXCEPTIONS (do NOT trust IEM here — see HKO/SHENZHEN notes below):
+#   hong_kong — Polymarket resolves on the Hong Kong Observatory "Absolute Daily Max",
+#               not an airport METAR. VHHH only reaches ~43% band agreement.
+#   shenzhen  — correct station (ZGSZ) but only ~11% agreement (ERA5 also ~29%);
+#               anomalous, needs deeper review before trusting either source.
+IEM_STATIONS = {
+    'new_york':     {'station': 'KLGA', 'tz': 'America/New_York',               'units': 'fahrenheit'},  # LaGuardia
+    'atlanta':      {'station': 'KATL', 'tz': 'America/New_York',               'units': 'fahrenheit'},
+    'dallas':       {'station': 'KDAL', 'tz': 'America/Chicago',                'units': 'fahrenheit'},  # Love Field
+    'chicago':      {'station': 'KORD', 'tz': 'America/Chicago',                'units': 'fahrenheit'},
+    'miami':        {'station': 'KMIA', 'tz': 'America/New_York',               'units': 'fahrenheit'},
+    'seattle':      {'station': 'KSEA', 'tz': 'America/Los_Angeles',            'units': 'fahrenheit'},
+    'austin':       {'station': 'KAUS', 'tz': 'America/Chicago',                'units': 'fahrenheit'},
+    'london':       {'station': 'EGLC', 'tz': 'Europe/London',                  'units': 'celsius'},     # London City
+    'paris':        {'station': 'LFPB', 'tz': 'Europe/Paris',                   'units': 'celsius'},     # Le Bourget
+    'madrid':       {'station': 'LEMD', 'tz': 'Europe/Madrid',                  'units': 'celsius'},     # Barajas
+    'moscow':       {'station': 'UUWW', 'tz': 'Europe/Moscow',                  'units': 'celsius'},     # Vnukovo
+    'beijing':      {'station': 'ZBAA', 'tz': 'Asia/Shanghai',                  'units': 'celsius'},     # Capital
+    'shanghai':     {'station': 'ZSPD', 'tz': 'Asia/Shanghai',                  'units': 'celsius'},     # Pudong
+    'singapore':    {'station': 'WSSS', 'tz': 'Asia/Singapore',                 'units': 'celsius'},     # Changi
+    'tokyo':        {'station': 'RJTT', 'tz': 'Asia/Tokyo',                     'units': 'celsius'},     # Haneda
+    'taipei':       {'station': 'RCSS', 'tz': 'Asia/Taipei',                    'units': 'celsius'},     # Songshan
+    'chongqing':    {'station': 'ZUCK', 'tz': 'Asia/Shanghai',                  'units': 'celsius'},     # Jiangbei
+    'qingdao':      {'station': 'ZSQD', 'tz': 'Asia/Shanghai',                  'units': 'celsius'},     # Jiaodong
+    'buenos_aires': {'station': 'SAEZ', 'tz': 'America/Argentina/Buenos_Aires', 'units': 'celsius'},     # Ezeiza
+    'lucknow':      {'station': 'VILK', 'tz': 'Asia/Kolkata',                   'units': 'celsius'},     # CCS
+    'toronto':      {'station': 'CYYZ', 'tz': 'America/Toronto',                'units': 'celsius'},     # Pearson
+}
+
+# Cities whose Polymarket market does NOT resolve on an airport METAR, so IEM must
+# not be used as ground truth. Routed to the ERA5 fallback until a proper source
+# (e.g. HKO daily extract) is wired in.
+IEM_EXCLUDED = {'hong_kong', 'shenzhen'}
+
 OBSERVATORIES = {
     'shanghai': {
         'lat': 31.1678, 'lon': 121.4369,
@@ -217,41 +261,114 @@ def _fetch_cdo_extremes(station_id: str, date: datetime.date) -> tuple[float | N
     return tmax, tmin
 
 
+def _fetch_iem_extremes(location_id: str, date: datetime.date) -> tuple[float | None, float | None]:
+    """
+    IEM ASOS daily extremes from hourly METAR temps grouped by the LOCAL calendar date.
+    Matches Weather Underground's settlement method (hourly METARs + SPECIs → daily high/low).
+    Returns (max, min) in the location's native units (°F if fahrenheit, else °C),
+    or (None, None) if the city has no IEM station or no data was returned.
+    """
+    meta = IEM_STATIONS.get(location_id)
+    if not meta:
+        return None, None
+    data_field = 'tmpf' if meta['units'] == 'fahrenheit' else 'tmpc'
+    params = {
+        'station':  meta['station'],
+        'data':     data_field,
+        'year1':    date.year,  'month1': date.month, 'day1': date.day,
+        'year2':    date.year,  'month2': date.month, 'day2': date.day,
+        'tz':       meta['tz'],
+        'format':   'onlycomma',
+        'latlon':   'no',
+        'direct':   'yes',
+    }
+    try:
+        with httpx.Client(timeout=20) as client:
+            r = client.get(IEM_URL, params=params)
+            r.raise_for_status()
+            body = r.text
+    except Exception as e:
+        print(f"   ⚠️  IEM error for {meta['station']} on {date}: {e}")
+        return None, None
+
+    temps: list[float] = []
+    for line in body.splitlines():
+        parts = line.strip().split(',')
+        if len(parts) < 3:
+            continue
+        try:
+            temps.append(float(parts[2].strip()))
+        except ValueError:
+            continue   # header row or 'M' (missing)
+
+    if not temps:
+        return None, None
+    return round(max(temps), 1), round(min(temps), 1)
+
+
 def fetch_daily_extremes(location_id: str, date: datetime.date) -> tuple[float | None, float | None]:
     """
-    Fetch daily max and min temperature for a location.
-    US cities route to NOAA CDO (actual ASOS readings) with Open-Meteo fallback.
-    All other cities use Open-Meteo Archive (ERA5 reanalysis).
-    Returns (max_temp, min_temp) in the location's native units, or (None, None).
+    Fetch daily max and min temperature for a location, in the location's native units.
+
+    Source cascade (all cities resolve on Weather Underground airport METARs, so IEM is
+    the universal first choice):
+      1. IEM ASOS hourly METAR  — = Weather Underground's method; the settlement source.
+      2. NOAA CDO GHCND          — US-only cross-check / fallback if IEM is empty.
+      3. Open-Meteo Archive ERA5 — last-resort fallback (and the only path for
+                                    IEM_EXCLUDED cities like hong_kong/shenzhen).
+    Returns (max_temp, min_temp) or (None, None).
     """
+    obs = OBSERVATORIES[location_id]
+    units_label = '°F' if obs['units'] == 'fahrenheit' else '°C'
+
+    if location_id in IEM_STATIONS and location_id not in IEM_EXCLUDED:
+        max_t, min_t = _fetch_iem_extremes(location_id, date)
+        if max_t is not None:
+            print(f"   ✅ {location_id:12s} {date}  max={max_t:.1f}{units_label}  min={min_t:.1f}{units_label}  [IEM ASOS]")
+            return max_t, min_t
+        # IEM empty (latency / missing day) — fall through.
+
     if location_id in US_GHCND_STATIONS:
         max_t, min_t = _fetch_cdo_extremes(US_GHCND_STATIONS[location_id], date)
         if max_t is not None:
-            obs = OBSERVATORIES[location_id]
-            units_label = '°F' if obs['units'] == 'fahrenheit' else '°C'
             print(f"   ✅ {location_id:12s} {date}  max={max_t:.1f}{units_label}  min={min_t:.1f}{units_label}  [NOAA CDO]")
             return max_t, min_t
         # CDO token missing or API error — fall through to Open-Meteo
 
     max_t, min_t = _fetch_open_meteo_extremes(location_id, date)
     if max_t is not None:
-        obs = OBSERVATORIES[location_id]
-        units_label = '°F' if obs['units'] == 'fahrenheit' else '°C'
         print(f"   ✅ {location_id:12s} {date}  max={max_t:.1f}{units_label}  min={min_t:.1f}{units_label}  [Open-Meteo]")
     else:
         print(f"   ❌ No data — {location_id} {date}")
     return max_t, min_t
 
 
-def backfill_outcomes(days_back: int = 7) -> None:
+def _source_label(location_id: str) -> str:
+    """How fetch_daily_extremes will source this city, as a row-`source` prefix.
+    IEM cities (non-excluded) → 'iem'; everything else → 'open-meteo'. The actual
+    fetch may still fall back, but this labels the intended primary source so the
+    DB row is self-documenting and re-migrations are idempotent."""
+    if location_id in IEM_STATIONS and location_id not in IEM_EXCLUDED:
+        return 'iem'
+    return 'open-meteo'
+
+
+def backfill_outcomes(days_back: int = 7, overwrite_sources: set[str] | None = None) -> None:
     """
-    Pull actual daily temperature extremes from Open-Meteo and upsert into the
-    outcomes table. Skips rows already marked verified with a non-null max temp.
+    Pull actual daily temperature extremes via fetch_daily_extremes (IEM → CDO →
+    Open-Meteo cascade) and upsert into the outcomes table.
+
+    By default skips rows already marked verified with a non-null max temp.
+    Pass `overwrite_sources` (e.g. {'open-meteo','era5'}) to ALSO re-fetch verified
+    rows whose existing `source` starts with one of those prefixes — used to migrate
+    legacy ERA5 rows onto the airport-METAR (IEM) source. Idempotent: once a row's
+    source becomes 'iem (...)' it won't be re-fetched on a subsequent migrate run.
     """
     session = init_database()
     backfilled = 0
 
-    print(f"✅ Backfilling outcomes via Open-Meteo (last {days_back} days)")
+    mode = f"migrate(overwrite={sorted(overwrite_sources)})" if overwrite_sources else "skip-verified"
+    print(f"✅ Backfilling outcomes (last {days_back} days) — {mode}")
 
     for location_id, obs in OBSERVATORIES.items():
         for days_ago in range(1, days_back + 1):
@@ -264,25 +381,32 @@ def backfill_outcomes(days_back: int = 7) -> None:
                 .first()
             )
             if existing and existing.verified and existing.actual_max_temp is not None:
-                continue
+                stale = bool(
+                    overwrite_sources
+                    and existing.source
+                    and any(existing.source.startswith(s) for s in overwrite_sources)
+                )
+                if not stale:
+                    continue
 
             max_temp, min_temp = fetch_daily_extremes(location_id, target_date)
             if max_temp is None:
                 print(f"   ❌ No data — {location_id} {target_date}")
                 continue
 
+            src_label = f'{_source_label(location_id)} ({obs["source_name"]})'
             if existing:
                 existing.actual_max_temp = max_temp
                 existing.actual_min_temp = min_temp
                 existing.verified = True
-                existing.source = f'open-meteo ({obs["source_name"]})'
+                existing.source = src_label
             else:
                 session.add(Outcome(
                     location_id=location_id,
                     date=target_dt,
                     actual_max_temp=max_temp,
                     actual_min_temp=min_temp,
-                    source=f'open-meteo ({obs["source_name"]})',
+                    source=src_label,
                     verified=True,
                 ))
 
@@ -464,6 +588,10 @@ if __name__ == "__main__":
     if len(_sys.argv) > 1 and _sys.argv[1] == 'precip':
         months = int(_sys.argv[2]) if len(_sys.argv) > 2 else 3
         backfill_precip_outcomes(months)
+    elif len(_sys.argv) > 1 and _sys.argv[1] == 'migrate':
+        # Re-fetch legacy ERA5/Open-Meteo rows onto the airport-METAR (IEM) source.
+        days = int(_sys.argv[2]) if len(_sys.argv) > 2 else 70
+        backfill_outcomes(days, overwrite_sources={'open-meteo', 'era5'})
     else:
         days = int(_sys.argv[1]) if len(_sys.argv) > 1 else 7
         backfill_outcomes(days)
