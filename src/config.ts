@@ -19,7 +19,7 @@ export const DEFAULT_CONFIG: BotConfig = {
   entry_threshold: 0.15,
   exit_threshold: 0.45,
   max_trades_per_run: 5,
-  max_open_positions: 10,
+  max_open_positions: 30,
   locations: "nyc,chicago,miami,dallas,seattle,atlanta,houston,denver,los-angeles,san-francisco,austin",
   polymarket_private_key: "",
   polymarket_proxy_wallet_address: "",

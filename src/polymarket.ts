@@ -5,10 +5,21 @@ export async function getMarketResolution(marketId: string): Promise<boolean | n
   const url = `https://gamma-api.polymarket.com/markets/${marketId}`;
   try {
     const r = await axios.get(url, { timeout: 5000 });
-    if (r.data?.closed || r.data?.resolved || r.data?.isResolved) {
-      const winner = String(r.data?.winner || r.data?.result || "").toLowerCase();
+    const data = r.data;
+    if (data?.closed || data?.resolved || data?.isResolved) {
+      // Primary: explicit winner field
+      const winner = String(data?.winner || data?.result || "").toLowerCase();
       if (winner === "yes" || winner === "1") return true;
       if (winner === "no" || winner === "0") return false;
+
+      // Fallback: NegRisk / UMA markets leave winner=null but set outcomePrices to ["1","0"] or ["0","1"]
+      if (data?.outcomePrices) {
+        try {
+          const prices = JSON.parse(data.outcomePrices) as string[];
+          if (prices[0] === "1") return true;
+          if (prices[0] === "0") return false;
+        } catch { /* ignore parse errors */ }
+      }
     }
     return null;
   } catch {
