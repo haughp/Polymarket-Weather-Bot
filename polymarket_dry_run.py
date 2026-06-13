@@ -112,8 +112,10 @@ _STATIC_BIAS_KEYS: set[tuple[str, str]] = {
     (loc, mode) for loc, modes in FORECAST_BIAS.items() for mode in modes
 }
 
-# Populated per main() call by _load_live_bias(). Per-cell EWMA sample count for telemetry.
-LIVE_BIAS_N: dict[str, dict[str, int]] = {}
+# Populated per main() call by _load_live_bias(). FORECAST_BIAS stays an immutable
+# cold-start constant; live values live here so the static fallback is never clobbered.
+LIVE_BIAS: dict[str, dict[str, float]] = {}    # (loc, mode) → live median bias
+LIVE_BIAS_N: dict[str, dict[str, int]] = {}    # (loc, mode) → resolved-sample count
 
 
 def _load_live_bias(session, min_samples: int = 5, days_back: int = 45) -> dict:
@@ -410,7 +412,7 @@ def record_dry_run(forecast: dict, session) -> None:
     matrix_cell = load_provider_matrix().get(location_id, {}).get(mode)
     if mode in LIVE_BIAS_N.get(location_id, {}):
         # Live outcome-based bias always wins (highest priority)
-        bias = FORECAST_BIAS.get(location_id, {}).get(mode, 0.0)
+        bias = LIVE_BIAS.get(location_id, {}).get(mode, 0.0)
         source = f"live(n={LIVE_BIAS_N[location_id][mode]})"
     elif matrix_cell is not None:
         bias = matrix_cell.get("bias", 0.0)
@@ -513,10 +515,11 @@ def main(pending_only: bool = False) -> None:
     session = init_database(auto_migrate=not pending_only)
 
     # Refresh bias from resolved outcomes — live values override static fallback.
-    # Sample counts are stashed in LIVE_BIAS_N for per-trade telemetry.
+    # Stored in LIVE_BIAS / LIVE_BIAS_N (NOT written back into FORECAST_BIAS, which
+    # stays an immutable cold-start constant for the `source=static` path).
     for loc, modes in _load_live_bias(session).items():
         for mode, (bias, n) in modes.items():
-            FORECAST_BIAS.setdefault(loc, {})[mode] = bias
+            LIVE_BIAS.setdefault(loc, {})[mode] = bias
             LIVE_BIAS_N.setdefault(loc, {})[mode] = n
 
     # Load the most recent forecast for each location (fallback path)

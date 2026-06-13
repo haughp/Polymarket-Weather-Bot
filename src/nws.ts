@@ -305,10 +305,27 @@ export async function fetchOpenMeteoMode(
   return { vals, time };
 }
 
+// Dedupe in-flight NWS fetches: getNwsForecast returns BOTH modes in one shot, so when
+// a city routes max AND min to NWS the two getModeForecast calls would otherwise hit the
+// API twice. Cache the in-flight promise per city for a short TTL (covers one tick's
+// concurrent max/min calls) and let it expire so the next tick re-fetches.
+const _nwsInflight = new Map<string, { at: number; p: Promise<DailyForecasts> }>();
+const _NWS_TTL_MS = 60_000;
+
+function getNwsForecastCached(citySlug: string): Promise<DailyForecasts> {
+  const hit = _nwsInflight.get(citySlug);
+  if (hit && Date.now() - hit.at < _NWS_TTL_MS) return hit.p;
+  const p = getNwsForecast(citySlug);
+  _nwsInflight.set(citySlug, { at: Date.now(), p });
+  // On rejection, drop the cache so a failed fetch isn't pinned for the whole TTL.
+  p.catch(() => _nwsInflight.delete(citySlug));
+  return p;
+}
+
 // Fetch a single mode from NWS by reusing the full NWS forecast and slicing it.
 // (NWS returns both max and min in one shot; per-mode callers just take what they need.)
 async function fetchNwsMode(citySlug: string, mode: "max" | "min"): Promise<ModeForecast> {
-  const f = await getNwsForecast(citySlug);
+  const f = await getNwsForecastCached(citySlug);
   return mode === "max"
     ? { vals: f.max, time: f.maxTime }
     : { vals: f.min, time: f.minTime };
