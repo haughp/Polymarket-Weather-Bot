@@ -27,6 +27,8 @@ class Forecast(Base):
     ecmwf_run = Column(DateTime, index=True)
     units = Column(String(16))
     confidence = Column(Float)
+    peak_time = Column(DateTime)  # UTC time of forecasted daily extremum on target_date
+    source = Column(String(32))   # which API produced this row: 'open-meteo' | 'nws'
 
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
@@ -86,6 +88,7 @@ class TradeSimulation(Base):
     order_type = Column(String(8))    # NO
     price = Column(Numeric(5, 4))
     size = Column(Numeric(12, 2))
+    hours_to_peak = Column(Numeric(6, 2), nullable=True)
     simulated_pnl = Column(Numeric(12, 2))
 
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
@@ -344,6 +347,32 @@ class WeatherBotTsTradeHistory(Base):
     created_at         = Column(DateTime, default=datetime.datetime.utcnow)
 
 
+class WeatherBotSignalSnapshot(Base):
+    """One row per bot tick per city/mode that passes the dual-bucket gate.
+    Enables empirical price-vs-lead-time and accuracy-vs-lead-time analysis."""
+    __tablename__ = "weatherbot_signal_snapshots"
+
+    id            = Column(Integer, primary_key=True, autoincrement=True)
+    snapshot_key  = Column(String(64), unique=True, nullable=False, index=True)
+    snapped_at    = Column(DateTime(timezone=True), nullable=False)
+    city          = Column(String(16), nullable=False, index=True)
+    mode          = Column(String(8), nullable=False)
+    market_date   = Column(Date, nullable=False, index=True)
+    hours_to_peak = Column(Numeric(5, 1))
+    nws_forecast  = Column(Numeric(5, 1))
+    adj_forecast  = Column(Numeric(5, 1))
+    bucket1_range = Column(String(16))
+    bucket1_price = Column(Numeric(6, 4))
+    bucket2_range = Column(String(16))
+    bucket2_price = Column(Numeric(6, 4))
+    entered       = Column(Boolean, default=False, nullable=False)
+    status        = Column(String(8))    # "live" | "shadow"
+    would_enter   = Column(Boolean)      # True if city would have entered (shadow accounting)
+    actual_temp   = Column(Numeric(5, 1))
+    winning_range = Column(String(16))
+    created_at    = Column(DateTime, default=datetime.datetime.utcnow)
+
+
 class PrecipStrategySignal(Base):
     """Decision snapshot per precipitation bucket for strategy v1."""
     __tablename__ = "precip_strategy_signals"
@@ -366,7 +395,7 @@ class PrecipStrategySignal(Base):
     max_entry_no     = Column(Numeric(6, 5))
     days_remaining   = Column(Integer)
     data_source      = Column(String(128))
-    blocked_reason   = Column(String(128))
+    blocked_reason   = Column(String(512))
     created_at       = Column(DateTime, default=datetime.datetime.utcnow)
 
 
@@ -393,7 +422,7 @@ class PrecipStrategyTrade(Base):
     data_source      = Column(String(128))
     realized_pnl     = Column(Numeric(12, 2))
     resolved_win     = Column(Boolean)
-    blocked_reason   = Column(String(128))
+    blocked_reason   = Column(String(512))
     created_at       = Column(DateTime, default=datetime.datetime.utcnow)
 
 
@@ -418,13 +447,60 @@ def migrate_schema(engine) -> None:
         ("precip_forecasts",  "model_auc",            "NUMERIC(6,4)"),
         ("precip_forecasts",  "model_eligible",       "BOOLEAN"),
         ("forecasts",         "mode",                 "VARCHAR(16) DEFAULT 'max'"),
+        ("forecasts",         "peak_time",            "TIMESTAMP"),
+        ("forecasts",         "source",               "VARCHAR(32)"),
         ("market_state",      "mode",                 "VARCHAR(16) DEFAULT 'max'"),
         ("trade_simulations", "mode",                 "VARCHAR(16) DEFAULT 'max'"),
+        ("trade_simulations", "hours_to_peak",        "NUMERIC(6,2)"),
+        ("weatherbot_signal_snapshots", "status",       "VARCHAR(8)"),
+        ("weatherbot_signal_snapshots", "would_enter",  "BOOLEAN"),
     ]
+    widenings = [
+        # Widen columns whose original size was too small (idempotent — VARCHAR widening never truncates)
+        ("precip_strategy_signals", "blocked_reason", "VARCHAR(512)"),
+        ("precip_strategy_trades",  "blocked_reason", "VARCHAR(512)"),
+    ]
+    # New whole-table additions (CREATE TABLE IF NOT EXISTS — not handled by ALTER TABLE)
+    with engine.connect() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS weatherbot_signal_snapshots (
+                id            SERIAL PRIMARY KEY,
+                snapshot_key  VARCHAR(64) UNIQUE NOT NULL,
+                snapped_at    TIMESTAMPTZ NOT NULL,
+                city          VARCHAR(16) NOT NULL,
+                mode          VARCHAR(8)  NOT NULL,
+                market_date   DATE NOT NULL,
+                hours_to_peak NUMERIC(5,1),
+                nws_forecast  NUMERIC(5,1),
+                adj_forecast  NUMERIC(5,1),
+                bucket1_range VARCHAR(16),
+                bucket1_price NUMERIC(6,4),
+                bucket2_range VARCHAR(16),
+                bucket2_price NUMERIC(6,4),
+                entered       BOOLEAN NOT NULL DEFAULT FALSE,
+                actual_temp   NUMERIC(5,1),
+                winning_range VARCHAR(16),
+                created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_wbss_city ON weatherbot_signal_snapshots (city)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_wbss_market_date ON weatherbot_signal_snapshots (market_date)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_wbss_snapshot_key ON weatherbot_signal_snapshots (snapshot_key)"
+        ))
+        conn.commit()
     with engine.connect() as conn:
         for table, col, typedef in additions:
             conn.execute(text(
                 f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {typedef}"
+            ))
+        for table, col, typedef in widenings:
+            conn.execute(text(
+                f"ALTER TABLE {table} ALTER COLUMN {col} TYPE {typedef}"
             ))
         conn.commit()
 
@@ -433,7 +509,15 @@ def init_database(auto_migrate: bool = False):
     """Initialize database connection, create tables, and apply migrations."""
     DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://padraighaughey@localhost:5432/gmgn_trading")
 
-    engine = create_engine(DATABASE_URL)
+    engine = create_engine(
+        DATABASE_URL,
+        connect_args={
+            "connect_timeout": 10,
+            "options": "-c lock_timeout=5000 -c statement_timeout=30000",
+        },
+        pool_pre_ping=True,
+        pool_recycle=3600,
+    )
     if auto_migrate:
         Base.metadata.create_all(engine)   # creates new tables (market_buckets etc.)
         migrate_schema(engine)             # adds new columns to existing tables
