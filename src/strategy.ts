@@ -2,6 +2,7 @@ import { buyYesFok, fetchAskPrice, getClobClient, sellYesLimit } from "./clob";
 import { BotConfig, getActiveLocations } from "./config";
 import { badge, C, divider, info, ok, panel, progressBar, skip, stat, warn } from "./colors";
 import { DailyForecasts, FORECAST_BIAS, LOCATIONS, getForecast } from "./nws";
+import { getBias, getMae } from "./matrix";
 import { parseTempRange } from "./parsing";
 import {
   PolymarketEvent,
@@ -16,7 +17,7 @@ import { isLive, loadCityStatus } from "./cityStatus";
 import { tomorrowInTz } from "./time";
 import type { ClobClient } from "@polymarket/clob-client-v2";
 
-const FIXED_POSITION_SIZE = 2.0;
+const FIXED_POSITION_SIZE = 1.05;
 
 // Minimum YES price — filter out near-zero (effectively-resolved) markets
 // Minimum YES price — filter out near-zero (effectively-resolved) markets
@@ -26,6 +27,12 @@ const MIN_YES_PRICE = 0.12;
 // Entry window relative to peak temperature time
 const PEAK_ENTRY_OPEN_H = 36;   // start entry window 36h before forecast peak
 const PEAK_ENTRY_CLOSE_H = 30;  // close entry window 30h before forecast peak
+
+// Max provider forecast error (debiased MAE, °F) the matrix-chosen provider may carry
+// before we refuse to trade that city/mode. Polymarket buckets are 2°F wide, so a provider
+// whose typical error exceeds this cannot reliably land in the right bucket. Cells with no
+// matrix entry (getMae → null) are NOT gated, preserving pre-matrix behavior.
+const MAX_PROVIDER_MAE = 2.5;
 
 export type TradeMode = "dry-run" | "paper" | "execute";
 
@@ -381,8 +388,16 @@ export async function run(options: RunOptions): Promise<void> {
         const forecastTemp = forecasts[marketMode === "highest" ? "max" : "min"][dateStr];
         if (forecastTemp == null) continue;
 
-        const biasOffset = FORECAST_BIAS[citySlug]?.[marketMode] ?? 0;
+        const biasOffset = getBias(citySlug, marketMode); // matrix → FORECAST_BIAS fallback → 0
         const adjustedForecastTemp = forecastTemp + biasOffset;
+
+        // Provider-accuracy gate: if the matrix's chosen provider for this city/mode has a
+        // debiased MAE wider than one ~2°F bucket, no bucket pick is reliable — skip.
+        const providerMae = getMae(citySlug, marketMode);
+        if (providerMae != null && providerMae > MAX_PROVIDER_MAE) {
+          skip(`Provider MAE too high for ${citySlug} ${marketMode} — ${providerMae.toFixed(2)}°F > ${MAX_PROVIDER_MAE}°F gate`);
+          continue;
+        }
 
         const event: PolymarketEvent | null = await getPolymarketEvent(
           citySlug,

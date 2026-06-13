@@ -5,6 +5,7 @@ Discovers active weather markets via Gamma API for each ECMWF forecast location,
 records order book state, and simulates NO bets on both confidence-band tails.
 """
 
+import os
 import re
 import sys
 import json
@@ -15,6 +16,22 @@ from database_schema import init_database, Forecast, MarketState, MarketBucket, 
 
 GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API = "https://clob.polymarket.com"
+
+_PROVIDER_MATRIX: dict | None = None  # lazy-loaded once
+
+
+def load_provider_matrix() -> dict:
+    """Load provider_matrix.json from repo root. Returns {} if absent."""
+    global _PROVIDER_MATRIX
+    if _PROVIDER_MATRIX is not None:
+        return _PROVIDER_MATRIX
+    path = os.path.join(os.path.dirname(__file__), "provider_matrix.json")
+    if os.path.exists(path):
+        with open(path) as f:
+            _PROVIDER_MATRIX = json.load(f).get("cities", {})
+    else:
+        _PROVIDER_MATRIX = {}
+    return _PROVIDER_MATRIX
 
 MONTHS = [
     'january', 'february', 'march', 'april', 'may', 'june',
@@ -390,15 +407,22 @@ def record_dry_run(forecast: dict, session) -> None:
         return
 
     raw_temp = float(forecast['forecast_temp'])
-    bias = FORECAST_BIAS.get(location_id, {}).get(mode, 0.0)
-    corrected_temp = raw_temp + bias
-    units_label_inner = '°F' if forecast['units'] == 'fahrenheit' else '°C'
+    matrix_cell = load_provider_matrix().get(location_id, {}).get(mode)
     if mode in LIVE_BIAS_N.get(location_id, {}):
+        # Live outcome-based bias always wins (highest priority)
+        bias = FORECAST_BIAS.get(location_id, {}).get(mode, 0.0)
         source = f"live(n={LIVE_BIAS_N[location_id][mode]})"
+    elif matrix_cell is not None:
+        bias = matrix_cell.get("bias", 0.0)
+        source = f"matrix(provider={matrix_cell.get('provider','?')})"
     elif (location_id, mode) in _STATIC_BIAS_KEYS:
+        bias = FORECAST_BIAS.get(location_id, {}).get(mode, 0.0)
         source = "static"
     else:
+        bias = 0.0
         source = "none"
+    corrected_temp = raw_temp + bias
+    units_label_inner = '°F' if forecast['units'] == 'fahrenheit' else '°C'
     print(f"   📐 Bias: raw={raw_temp:.1f}{units_label_inner} "
           f"applied={bias:+.1f}{units_label_inner} "
           f"corrected={corrected_temp:.1f}{units_label_inner} "
@@ -495,33 +519,82 @@ def main(pending_only: bool = False) -> None:
             FORECAST_BIAS.setdefault(loc, {})[mode] = bias
             LIVE_BIAS_N.setdefault(loc, {})[mode] = n
 
-    # Load the most recent forecast for each location
-    from sqlalchemy import func
-    subq = (
-        session.query(
-            Forecast.location_id,
-            Forecast.mode,
-            func.max(Forecast.created_at).label('latest'),
+    # Load the most recent forecast for each location (fallback path)
+    from sqlalchemy import func, text as sa_text
+    def _get_latest_from_forecasts(loc_id, mode_):
+        subq = (
+            session.query(
+                Forecast.location_id,
+                Forecast.mode,
+                func.max(Forecast.created_at).label('latest'),
+            )
+            .filter(Forecast.location_id == loc_id, Forecast.mode == mode_)
+            .group_by(Forecast.location_id, Forecast.mode)
+            .subquery()
         )
-        .group_by(Forecast.location_id, Forecast.mode)
-        .subquery()
-    )
-    forecasts = (
-        session.query(Forecast)
-        .join(subq, (Forecast.location_id == subq.c.location_id) &
-                    (Forecast.mode == subq.c.mode) &
-                    (Forecast.created_at == subq.c.latest))
-        .all()
-    )
+        return (
+            session.query(Forecast)
+            .join(subq, (Forecast.location_id == subq.c.location_id) &
+                        (Forecast.mode == subq.c.mode) &
+                        (Forecast.created_at == subq.c.latest))
+            .first()
+        )
 
-    if not forecasts:
+    # Collect all (location_id, mode) pairs from the forecasts table
+    from sqlalchemy import distinct
+    loc_modes = session.query(
+        distinct(Forecast.location_id), Forecast.mode
+    ).all()
+
+    if not loc_modes:
         print("⚠️  No forecasts in DB. Run ecmwf_forecast_pipeline.py first.")
         session.close()
         return
 
-    print(f"\n🔍 Processing {len(forecasts)} forecast locations…")
+    matrix = load_provider_matrix()
+    print(f"\n🔍 Processing {len(loc_modes)} forecast locations…")
 
-    for fc in forecasts:
+    for (loc_id, mode_) in loc_modes:
+        # Matrix-aware forecast fetch: prefer provider_forecasts table when matrix
+        # assigns a non-NWS provider; fall back to forecasts table otherwise.
+        fc = None
+        forecast_source_label = "forecasts table"
+        cell = matrix.get(loc_id, {}).get(mode_)
+        if cell and cell.get("provider") not in (None, "nws"):
+            provider = cell["provider"]
+            tz_name = LOCATION_TIMEZONES.get(loc_id, 'UTC')
+            target_date = (
+                datetime.datetime.now(datetime.timezone.utc)
+                .astimezone(ZoneInfo(tz_name)) + datetime.timedelta(days=1)
+            ).date()
+            row = session.execute(sa_text("""
+                SELECT forecast_temp FROM provider_forecasts
+                WHERE city = :city AND mode = :mode AND provider = :prov
+                  AND target_date = :tdate
+                ORDER BY captured_at DESC LIMIT 1
+            """), {"city": loc_id, "mode": mode_, "prov": provider,
+                   "tdate": target_date}).fetchone()
+            if row:
+                # Build a synthetic forecast dict compatible with record_dry_run
+                fc_base = _get_latest_from_forecasts(loc_id, mode_)
+                if fc_base:
+                    fc = type("FC", (), {
+                        "id": fc_base.id,
+                        "location_id": loc_id,
+                        "mode": mode_,
+                        "location_name": fc_base.location_name,
+                        "forecast_temp": float(row[0]),
+                        "units": fc_base.units,
+                        "ecmwf_run": fc_base.ecmwf_run,
+                        "peak_time": fc_base.peak_time,
+                    })()
+                    forecast_source_label = f"provider_forecasts({provider})"
+
+        if fc is None:
+            fc = _get_latest_from_forecasts(loc_id, mode_)
+        if fc is None:
+            continue
+
         if pending_only:
             tz_name = LOCATION_TIMEZONES.get(fc.location_id, 'UTC')
             now_local = datetime.datetime.now(datetime.timezone.utc).astimezone(ZoneInfo(tz_name))
@@ -533,8 +606,8 @@ def main(pending_only: bool = False) -> None:
                 order_type='YES',
             ).first()
             if has_trade:
-                continue  # city already filled — skip on retry pass
-                
+                continue  # already filled — skip on retry pass
+
         forecast_dict = {
             'db_id': fc.id,
             'location_id': fc.location_id,
@@ -544,6 +617,7 @@ def main(pending_only: bool = False) -> None:
             'units': fc.units,
             'ecmwf_run': fc.ecmwf_run,
             'peak_time': fc.peak_time,
+            '_forecast_source': forecast_source_label,
         }
         record_dry_run(forecast_dict, session)
 

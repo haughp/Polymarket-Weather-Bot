@@ -1,0 +1,183 @@
+{
+  "generated_at": "2026-06-12T15:27:58Z",
+  "window_days": 90,
+  "lead_days": 1,
+  "cities": {
+    "nyc": {
+      "max": {
+        "provider": "ukmo_seamless",
+        "bias": 0.82,
+        "mae": 2.33,
+        "mae_debiased": 2.15,
+        "samples": 90
+      },
+      "min": {
+        "provider": "ecmwf_aifs025_single",
+        "bias": 0.31,
+        "mae": 1.53,
+        "mae_debiased": 1.56,
+        "samples": 90
+      }
+    },
+    "chicago": {
+      "max": {
+        "provider": "gem_seamless",
+        "bias": -0.54,
+        "mae": 2.05,
+        "mae_debiased": 2.07,
+        "samples": 90
+      },
+      "min": {
+        "provider": "ncep_nbm_conus",
+        "bias": -2.68,
+        "mae": 3.19,
+        "mae_debiased": 2.32,
+        "samples": 90
+      }
+    },
+    "miami": {
+      "max": {
+        "provider": "ecmwf_aifs025_single",
+        "bias": 4.21,
+        "mae": 4.3,
+        "mae_debiased": 1.42,
+        "samples": 89
+      },
+      "min": {
+        "provider": "ecmwf_ifs025",
+        "bias": 0.04,
+        "mae": 1.24,
+        "mae_debiased": 1.24,
+        "samples": 89
+      }
+    },
+    "dallas": {
+      "max": {
+        "provider": "ecmwf_aifs025_single",
+        "bias": 1.75,
+        "mae": 2.13,
+        "mae_debiased": 1.67,
+        "samples": 90
+      },
+      "min": {
+        "provider": "ecmwf_aifs025_single",
+        "bias": 0.47,
+        "mae": 1.88,
+        "mae_debiased": 1.82,
+        "samples": 90
+      }
+    },
+    "seattle": {
+      "max": {
+        "provider": "ecmwf_aifs025_single",
+        "bias": 2.87,
+        "mae": 3.09,
+        "mae_debiased": 1.76,
+        "samples": 90
+      },
+      "min": {
+        "provider": "ncep_nbm_conus",
+        "bias": -1.11,
+        "mae": 1.48,
+        "mae_debiased": 1.1,
+        "samples": 90
+      }
+    },
+    "atlanta": {
+      "max": {
+        "provider": "ecmwf_aifs025_single",
+        "bias": 3.56,
+        "mae": 3.72,
+        "mae_debiased": 1.66,
+        "samples": 90
+      },
+      "min": {
+        "provider": "ncep_nbm_conus",
+        "bias": 0.17,
+        "mae": 1.35,
+        "mae_debiased": 1.33,
+        "samples": 89
+      }
+    },
+    "houston": {
+      "max": {
+        "provider": "ncep_nbm_conus",
+        "bias": 1.12,
+        "mae": 1.58,
+        "mae_debiased": 1.38,
+        "samples": 90
+      },
+      "min": {
+        "provider": "gfs_seamless",
+        "bias": 1.33,
+        "mae": 2.09,
+        "mae_debiased": 1.61,
+        "samples": 90
+      }
+    },
+    "denver": {
+      "max": {
+        "provider": "ecmwf_aifs025_single",
+        "bias": 2.76,
+        "mae": 3.44,
+        "mae_debiased": 2.66,
+        "samples": 90
+      },
+      "min": {
+        "provider": "ecmwf_aifs025_single",
+        "bias": 0.26,
+        "mae": 2.14,
+        "mae_debiased": 2.12,
+        "samples": 90
+      }
+    },
+    "los-angeles": {
+      "max": {
+        "provider": "icon_seamless",
+        "bias": -1.8,
+        "mae": 2.68,
+        "mae_debiased": 2.33,
+        "samples": 90
+      },
+      "min": {
+        "provider": "ecmwf_aifs025_single",
+        "bias": 1.67,
+        "mae": 1.82,
+        "mae_debiased": 1.06,
+        "samples": 90
+      }
+    },
+    "san-francisco": {
+      "max": {
+        "provider": "ecmwf_ifs025",
+        "bias": 3.25,
+        "mae": 3.34,
+        "mae_debiased": 1.8,
+        "samples": 90
+      },
+      "min": {
+        "provider": "ncep_nbm_conus",
+        "bias": -0.96,
+        "mae": 1.47,
+        "mae_debiased": 1.29,
+        "samples": 90
+      }
+    },
+    "austin": {
+      "max": {
+        "provider": "icon_seamless",
+        "bias": 1.82,
+        "mae": 2.71,
+        "mae_debiased": 1.89,
+        "samples": 90
+      },
+      "min": {
+        "provider": "ecmwf_aifs025_single",
+        "bias": -2.06,
+        "mae": 2.64,
+        "mae_debiased": 2.46,
+        "samples": 90
+      }
+    }
+  }
+}
