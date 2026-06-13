@@ -331,11 +331,13 @@ def extract_forecast(location_id: str, mode: str = 'max') -> dict | None:
     target_date = target_date_for(location_id)
 
     if location_id in NWS_FORECAST_US_CITIES:
+        source = 'nws'
         result = fetch_nws_forecast(
             obs['lat'], obs['lon'], target_date,
             LOCATION_TIMEZONES[location_id], obs['units'], mode,
         )
     else:
+        source = 'open-meteo'
         result = fetch_ecmwf_daily_and_peak(
             obs['lat'], obs['lon'], target_date,
             LOCATION_TIMEZONES[location_id], obs['units'], mode,
@@ -354,6 +356,7 @@ def extract_forecast(location_id: str, mode: str = 'max') -> dict | None:
         'peak_time':     peak_utc,
         'units':         obs['units'],
         'confidence':    0.962,
+        'source':        source,
     }
 
 
@@ -412,6 +415,7 @@ def main():
             units         = r['units'],
             confidence    = r['confidence'],
             peak_time     = r['peak_time'],
+            source        = r['source'],
         )
         session.add(forecast)
 

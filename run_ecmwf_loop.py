@@ -104,6 +104,27 @@ def _run_pipeline(full_refresh: bool = True) -> bool:
     return True
 
 
+def _run_settle_and_redeem() -> None:
+    """Stage 6 — settle resolved precip positions and redeem any wins. Runs once per day."""
+    try:
+        import importlib
+        import scripts.settle_precip_trades as settle_mod
+        importlib.reload(settle_mod)
+        settle_mod.main(live=True)
+        log.info("Stage 6a ✅  Precip settlement complete")
+    except Exception as exc:
+        log.error("Stage 6a ❌  Precip settlement failed: %s", exc)
+
+    try:
+        import importlib
+        import scripts.redeem_precip_wins as redeem_mod
+        importlib.reload(redeem_mod)
+        redeem_mod.main(live=True)
+        log.info("Stage 6b ✅  Precip redemption complete")
+    except Exception as exc:
+        log.error("Stage 6b ❌  Precip redemption failed: %s", exc)
+
+
 def show_recent() -> None:
     from database_schema import init_database, TradeSimulation, PrecipTradeSimulation, PrecipStrategyTrade
     session = init_database()
@@ -188,6 +209,7 @@ def main() -> None:
 
     _run_pipeline(full_refresh=True)
     next_ecmwf = _next_ecmwf_utc()
+    last_settle = datetime.datetime.min   # epoch — triggers Stage 6 on first tick
 
     while True:
         try:
@@ -210,6 +232,11 @@ def main() -> None:
             _run_pipeline(full_refresh=do_full)
             if do_full:
                 next_ecmwf = _next_ecmwf_utc()
+
+            # Stage 6: settle + redeem once per day
+            if (now - last_settle).total_seconds() >= 86400:
+                _run_settle_and_redeem()
+                last_settle = now
 
         except Exception:
             log.exception("Loop body crashed — sleeping 60s before retry")

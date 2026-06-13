@@ -34,7 +34,7 @@ CLOB_BASE = "https://clob.polymarket.com"
 # Day-of-month window for trade entry (18th is primary; 18-20 covers pipeline downtime)
 TRADE_DAY_WINDOW = (18, 20)
 TARGET_CITIES = ("seattle", "nyc")
-TRADE_SIZE_USD = 1.0
+TRADE_SIZE_USD = 1.05  # slightly above $1 to avoid Polymarket rounding rejections
 MAX_YES_ENTRY_PRICE = 0.50
 
 
@@ -313,7 +313,7 @@ def run(execute: bool = False) -> None:
                     edge_no=None,
                     days_remaining=fc.get("days_remaining"),
                     data_source=f"{fc.get('source')}|{fc.get('model_name')}",
-                    blocked_reason=block_reason,
+                    blocked_reason=block_reason[:128] if block_reason else None,
                 )
             )
             session.commit()
