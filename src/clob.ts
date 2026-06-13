@@ -1,5 +1,6 @@
 import { Wallet } from "@ethersproject/wallet";
-import { ClobClient, OrderType, Side } from "@polymarket/clob-client";
+import { ClobClient, OrderType, Side, SignatureTypeV2 } from "@polymarket/clob-client-v2";
+import axios from "axios";
 import { info, ok, warn } from "./colors";
 import type { BotConfig } from "./config";
 
@@ -46,14 +47,12 @@ export async function getApiCreds(cfg: BotConfig): Promise<{
   const wallet = getSignerWallet(cfg);
   const funder = getFunderAddress(cfg, wallet);
   const signatureType = cfg.signature_type;
-  const temp = new ClobClient(
-    CLOB_HOST,
-    CHAIN_ID,
-    wallet,
-    undefined,
-    signatureType,
-    funder
-  );
+  const temp = new ClobClient({
+    host: CLOB_HOST,
+    chain: CHAIN_ID,
+    signer: wallet,
+    signatureType: signatureType as SignatureTypeV2,
+  });
 
   let lastError: unknown;
   try {
@@ -92,16 +91,48 @@ export async function getClobClient(cfg: BotConfig): Promise<ClobClient> {
   const { wallet, apiCreds } = await getApiCreds(cfg);
   const signatureType = cfg.signature_type;
   const funder = getFunderAddress(cfg, wallet);
-  return new ClobClient(
-    CLOB_HOST,
-    CHAIN_ID,
-    wallet,
-    apiCreds,
-    signatureType,
-    funder || undefined
-  );
+  return new ClobClient({
+    host: CLOB_HOST,
+    chain: CHAIN_ID,
+    signer: wallet,
+    creds: apiCreds,
+    signatureType: signatureType as SignatureTypeV2,
+  });
 }
 
+/** Returns the current lowest ask (what you pay to buy YES) from the CLOB. */
+export async function fetchAskPrice(tokenId: string): Promise<number> {
+  const r = await axios.get(`${CLOB_HOST}/price`, {
+    params: { token_id: tokenId, side: "sell" },
+    timeout: 8000,
+    headers: { "User-Agent": "weatherbot-ts/1.0" }
+  });
+  const price = parseFloat(r.data?.price);
+  if (!isFinite(price) || price <= 0) {
+    throw new Error(`Invalid ask price for token ${tokenId}: ${JSON.stringify(r.data)}`);
+  }
+  return price;
+}
+
+export async function buyYesFok(
+  client: ClobClient,
+  tokenId: string,
+  limitPrice: number,
+  amountUsdc: number
+): Promise<{ filled: boolean; orderId: string }> {
+  // createAndPostMarketOrder accepts FOK/FAK; `amount` = USDC to spend (BUY side)
+  const resp = (await client.createAndPostMarketOrder(
+    { tokenID: tokenId, price: limitPrice, side: Side.BUY, amount: amountUsdc },
+    undefined,
+    OrderType.FOK
+  )) as Record<string, unknown> | null;
+  // FOK fills completely or cancels — check status field
+  const status = String(resp?.status ?? "").toUpperCase();
+  const filled = status === "MATCHED" || status === "FILLED" || status === "MTC";
+  return { filled, orderId: String(resp?.orderID ?? "") };
+}
+
+/** @deprecated Use buyYesFok — GTC orders sit unmatched in thin weather markets. */
 export async function buyYesLimit(
   client: ClobClient,
   tokenId: string,

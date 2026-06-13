@@ -24,6 +24,7 @@ Install: pip install py-clob-client-v2
 from __future__ import annotations
 
 import logging
+import math
 import os
 import time
 from dataclasses import dataclass
@@ -85,6 +86,8 @@ class WeatherExecutor:
         "fok_order_not_filled",
         "not filled",
         "invalid token",
+        "min size",
+        "invalid amount",
     )
     _RETRY_ERRORS = (
         "connection",
@@ -193,7 +196,8 @@ class WeatherExecutor:
     # ── Internal helpers ───────────────────────────────────────────
 
     def _simulate_buy(self, token_id: str, price: float, size: float) -> OrderResult:
-        shares = round(size / price, 4) if price > 0 else 0.0
+        # Ceiling to 2dp mirrors the CLOB's internal floor; prevents amount < min $1
+        shares = math.ceil(size / price * 100) / 100 if price > 0 else 0.0
         log.info(
             "DRY RUN BUY: token=...%s @ %.4f  $%.2f  shares=%.4f",
             token_id[-8:], price, size, shares,
@@ -254,7 +258,8 @@ class WeatherExecutor:
                     except Exception as sync_exc:
                         log.warning("Collateral sync failed (proceeding): %s", sync_exc)
 
-                shares = round(size / price, 4) if price > 0 else 0.0
+                # Ceiling to 2dp mirrors the CLOB's internal floor; prevents amount < min $1
+                shares = math.ceil(size / price * 100) / 100 if price > 0 else 0.0
                 args = OrderArgs(
                     token_id=token_id,
                     price=round(price, 4),
