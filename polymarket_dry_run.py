@@ -228,47 +228,99 @@ def get_yes_ask(clob_token_id_yes: str) -> float | None:
 
 # ── Market classification ──────────────────────────────────────────────────────
 
-def parse_temp_range(question: str) -> tuple[float | None, float | None]:
+def _bucket_width(question: str) -> float:
     """
-    Extract (low, high) temperature bounds from a market question.
-    Returns (None, X) for below-X markets, (X, None) for above-X markets,
-    (lo, hi) for range buckets, and (X, X) for single-degree HK-style markets.
+    Polymarket temperature buckets are a fixed width keyed on the unit:
+      °F (US) markets are 2° wide; °C (non-US) markets are 1° wide.
+    Detect from the question text; default to 2 (°F) since the only Celsius
+    shape in this market set is the single-degree "be X°C" form.
     """
     q = question.lower()
+    if '°c' in q or 'celsius' in q:
+        return 1.0
+    return 2.0
 
-    # "between X and Y" or "X-Y°"
+
+def parse_temp_range(
+    question: str,
+) -> tuple[float | None, float | None, float | None]:
+    """
+    Extract a temperature bucket from a market question as a half-open interval.
+
+    Returns (lo, hi, width) where, for a finite bucket, the interval is the
+    HALF-OPEN range [lo, hi) and ``hi == lo + width``:
+      - range bucket  "between 62-63°F" -> (62.0, 64.0, 2.0)  [62,64)
+      - single-degree "be 13°C"         -> (13.0, 14.0, 1.0)  [13,14)
+    Tail markets keep their single bound and carry width=None:
+      - "X°F or below" -> (None, X, None)   (inclusive of X)
+      - "X°F or higher"-> (X, None, None)   (inclusive of X)
+    Unparseable -> (None, None, None).
+
+    A label names the LOWER bound; the bucket spans one full width above it, so
+    "62-63" really resolves on a 62 or 63 reading => true interval [62, 64).
+    """
+    q = question.lower()
+    width = _bucket_width(question)
+
+    # "between X and Y" or "X-Y°" — a width-wide bucket whose label lower bound is X.
     m = re.search(r'between\s+(\d+\.?\d*)\s*(?:-|and)\s*(\d+\.?\d*)', q)
     if m:
-        return float(m.group(1)), float(m.group(2))
+        lo = float(m.group(1))
+        return lo, lo + width, width
     # bare "54-55°f" / "19-20°c" style range
     m = re.search(r'(\d+)\s*-\s*(\d+)°', question)
     if m:
-        return float(m.group(1)), float(m.group(2))
+        lo = float(m.group(1))
+        return lo, lo + width, width
 
-    # "below X" / "under X" / "X°F or below" / "X or lower"
+    # "below X" / "under X" / "X°F or below" / "X or lower" — tail, inclusive of X.
     # The \s*°?[a-z]* allows for unit suffixes like °F / °C between the number and "or"
     m = re.search(r'(?:below|under|less than)\s+(\d+\.?\d*)', q)
     if m:
-        return None, float(m.group(1))
+        return None, float(m.group(1)), None
     m = re.search(r'(\d+\.?\d*)\s*°?[a-z]*\s+or\s+(?:below|under|lower|less)', q)
     if m:
-        return None, float(m.group(1))
+        return None, float(m.group(1)), None
 
-    # "above X" / "over X" / "X°F or higher" / "X or above"
+    # "above X" / "over X" / "X°F or higher" / "X or above" — tail, inclusive of X.
     m = re.search(r'(?:above|over|more than|higher than|at least)\s+(\d+\.?\d*)', q)
     if m:
-        return float(m.group(1)), None
+        return float(m.group(1)), None, None
     m = re.search(r'(\d+\.?\d*)\s*°?[a-z]*\s+or\s+(?:above|over|higher|more)', q)
     if m:
-        return float(m.group(1)), None
+        return float(m.group(1)), None, None
 
-    # Single-degree format: "be 26°C" / "be 26°" (Hong Kong / Shanghai style)
+    # Single-degree format: "be 26°C" / "be 26°" (Hong Kong / Shanghai style).
+    # The label names the lower bound of a width-wide (1°C) bucket: "be 13°C"
+    # resolves on a reading in [13, 14).
     m = re.search(r'\bbe\s+(\d+\.?\d*)°', question, re.IGNORECASE)
     if m:
         v = float(m.group(1))
-        return v, v   # exact bucket — treat as (X, X) for band comparison
+        return v, v + width, width
 
-    return None, None
+    return None, None, None
+
+
+def bucket_contains(
+    lo: float | None,
+    hi: float | None,
+    width: float | None,
+    actual: float,
+) -> bool:
+    """
+    The single definition of whether an actual reading resolves a bucket YES.
+
+    Finite buckets are HALF-OPEN [lo, hi): an "62-63°F" bucket ([62,64)) wins on
+    a 62 or 63 reading but NOT 64 (which is the next bucket's). Tail markets keep
+    inclusive bounds: "or higher" wins on actual >= lo, "or below" on actual <= hi.
+    """
+    if lo is not None and hi is not None:
+        return lo <= actual < hi
+    if lo is not None:
+        return actual >= lo
+    if hi is not None:
+        return actual <= hi
+    return False
 
 
 def classify_markets(
@@ -284,7 +336,7 @@ def classify_markets(
 
     for mkt in markets:
         question = mkt.get('question', '')
-        low, high = parse_temp_range(question)
+        low, high, width = parse_temp_range(question)
         if low is None and high is None:
             continue
 
@@ -294,6 +346,8 @@ def classify_markets(
         except Exception:
             yes_p = 0.0
 
+        # high is the EXCLUSIVE upper bound, so (low+high)/2 is the true bucket
+        # centre: "62-63°F" -> [62,64) -> 63; "be 13°C" -> [13,14) -> 13.5.
         if low is not None and high is not None:
             midpoint = (low + high) / 2.0
         elif low is not None:
@@ -305,6 +359,7 @@ def classify_markets(
             'market':   mkt,
             'question': question,
             'range':    (low, high),
+            'width':    width,
             'midpoint': midpoint,
             'distance': abs(midpoint - forecast_temp),
             'yes_price': yes_p,

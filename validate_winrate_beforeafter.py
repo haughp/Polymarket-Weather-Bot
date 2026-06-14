@@ -6,9 +6,10 @@ Re-grades every settled YES trade_simulation against two ground truths:
   OLD = ERA5 outcomes (from outcomes_pre_iem_backup.csv, the pre-migration snapshot)
   NEW = IEM airport-METAR outcomes (current DB)
 
-Uses the exact win logic from outcome_backfiller.settle_temperature_pnl:
-  single-degree bucket (lo==hi): won = round(actual) == lo
-  range/open-ended:              won = lo <= actual <= hi
+Uses the exact win logic from outcome_backfiller.settle_temperature_pnl via the
+shared polymarket_dry_run.bucket_contains():
+  finite bucket: half-open [lo, hi)  (hi = lo + width; "62-63°F" -> [62,64))
+  tail markets:  inclusive bound     ("X or higher" -> actual >= lo)
 
 Caveat: these trades were SELECTED under the old ERA5-biased corrector, so this
 isolates the ground-truth-source fix (did we mis-grade wins/losses against the
@@ -24,7 +25,7 @@ from pathlib import Path
 
 from sqlalchemy import text
 from database_schema import init_database
-from polymarket_dry_run import parse_temp_range
+from polymarket_dry_run import parse_temp_range, bucket_contains
 
 US = {'new_york', 'atlanta', 'dallas', 'chicago', 'miami', 'seattle', 'austin'}
 EXCLUDED = {'hong_kong', 'shenzhen'}   # outcomes still ERA5 even in "new" set
@@ -47,14 +48,11 @@ def load_csv_outcomes(path):
 
 
 def won(question, actual, mode):
-    lo, hi = parse_temp_range(question or '')
+    lo, hi, width = parse_temp_range(question or '')
     if lo is None and hi is None:
         return None
-    if lo is not None and hi is not None and lo == hi:
-        return round(actual) == lo
-    lower = lo if lo is not None else float('-inf')
-    upper = hi if hi is not None else float('inf')
-    return lower <= actual <= upper
+    # Half-open [lo, lo+width) for finite buckets; inclusive bound for tails.
+    return bucket_contains(lo, hi, width, actual)
 
 
 def main():

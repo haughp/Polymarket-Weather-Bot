@@ -3,7 +3,7 @@ import { BotConfig, getActiveLocations } from "./config";
 import { badge, C, divider, info, ok, panel, progressBar, skip, stat, warn } from "./colors";
 import { DailyForecasts, FORECAST_BIAS, LOCATIONS, getForecast } from "./nws";
 import { getBias, getMae } from "./matrix";
-import { parseTempRange } from "./parsing";
+import { parseTempRange, bucketMidpoint } from "./parsing";
 import {
   PolymarketEvent,
   PolymarketMarket,
@@ -472,14 +472,7 @@ export async function run(options: RunOptions): Promise<void> {
             const yesPrice = Number(prices[0]);
             if (!isFinite(yesPrice) || yesPrice < MIN_YES_PRICE) continue;
 
-            let midpoint: number;
-            if (rng[0] === -999) {
-              midpoint = rng[1]; // Use upper boundary as midpoint for "or below" (e.g., 70 for "-999 to 70")
-            } else if (rng[1] === 999) {
-              midpoint = rng[0]; // Use lower boundary as midpoint for "or higher" (e.g., 70 for "70 to 999")
-            } else {
-              midpoint = (rng[0] + rng[1]) / 2;
-            }
+            const midpoint = bucketMidpoint(rng);
             const midpointDistance = Math.abs(midpoint - adjustedForecastTemp);
             candidateBuckets.push({ market, question, price: yesPrice, range: rng, midpointDistance });
           } catch {

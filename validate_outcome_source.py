@@ -34,6 +34,7 @@ from polymarket_dry_run import (
     LOCATION_SLUGS,
     fetch_event_markets,
     parse_temp_range,
+    bucket_contains,
 )
 
 IEM_URL = "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py"
@@ -120,26 +121,22 @@ def polymarket_winning_band(location_id: str, date: datetime.date, mode: str = '
                 continue
         if not op or str(op[0]) != '1':   # YES (index 0) must have paid out
             continue
-        low, high = parse_temp_range(m.get('question', ''))
+        low, high, width = parse_temp_range(m.get('question', ''))
         if low is None and high is None:
             continue
-        # Single-degree exact bucket → widen to rounding band.
-        if low is not None and high is not None and low == high:
-            return (low - 0.5, high + 0.5)
-        return (low, high)
+        # parse_temp_range already returns the true half-open interval
+        # ("be 13°C" -> [13,14)); no manual ±0.5 widening needed.
+        return (low, high, width)
     return None
 
 
 def in_band(value, band):
-    """Is value within the (low, high) band? Open-ended bounds use None."""
+    """Is value within the bucket? Half-open [low, high) for finite buckets,
+    inclusive bound for open-ended tails."""
     if value is None or band is None:
         return None
-    low, high = band
-    if low is not None and value < low:
-        return False
-    if high is not None and value > high:
-        return False
-    return True
+    low, high, width = band
+    return bucket_contains(low, high, width, value)
 
 
 def main(days_back: int = 30):

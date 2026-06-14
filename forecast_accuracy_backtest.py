@@ -34,7 +34,7 @@ import httpx
 from sqlalchemy import text
 
 from database_schema import init_database
-from polymarket_dry_run import MONTHS, LOCATION_SLUGS, parse_temp_range, classify_markets
+from polymarket_dry_run import MONTHS, LOCATION_SLUGS, parse_temp_range, classify_markets, bucket_contains
 
 GAMMA_API = "https://gamma-api.polymarket.com"
 WINDOW_DAYS = 30
@@ -185,9 +185,7 @@ def compute_hit(markets: list[dict], forecast_temp: float, actual_temp: float) -
 
     for cand in top2:
         lo, hi = cand["range"]
-        lo_bound = lo if lo is not None else float("-inf")
-        hi_bound = hi if hi is not None else float("inf")
-        if lo_bound <= actual_temp <= hi_bound:
+        if bucket_contains(lo, hi, cand.get("width"), actual_temp):
             return True
     return False
 

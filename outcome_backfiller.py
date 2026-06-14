@@ -513,7 +513,7 @@ def settle_temperature_pnl(session=None) -> None:
     """
     import datetime as _dt
     from sqlalchemy import func
-    from polymarket_dry_run import parse_temp_range
+    from polymarket_dry_run import parse_temp_range, bucket_contains
     from database_schema import TradeSimulation, Outcome, init_database
 
     if session is None:
@@ -548,7 +548,7 @@ def settle_temperature_pnl(session=None) -> None:
         if not outcome or outcome.actual_max_temp is None:
             continue
 
-        lo, hi = parse_temp_range(trade.question_text or '')
+        lo, hi, width = parse_temp_range(trade.question_text or '')
         if lo is None and hi is None:
             continue
 
@@ -558,24 +558,18 @@ def settle_temperature_pnl(session=None) -> None:
             actual = float(outcome.actual_min_temp)
         else:
             actual = float(outcome.actual_max_temp)
-        
-        # Single-degree city markets ("be 27°C") resolve YES when the rounded
-        # reading equals the bucket integer — not on strict equality with the
-        # fractional actual. Range/open-ended buckets keep containment semantics.
-        if lo is not None and hi is not None and lo == hi:
-            won = round(actual) == lo
-        else:
-            lower_bound = lo if lo is not None else float('-inf')
-            upper_bound = hi if hi is not None else float('inf')
-            won = lower_bound <= actual <= upper_bound
-        
+
+        # Half-open [lo, lo+width) for finite buckets; inclusive bound for tails.
+        # "62-63°F" -> [62,64) wins on 62/63 not 64; "be 13°C" -> [13,14).
+        won = bucket_contains(lo, hi, width, actual)
+
         size  = float(trade.size)
         price = float(trade.price)
         trade.simulated_pnl = round(size / price - size, 2) if won else round(-size, 2)
         
         print(
             f"   💸 Settled YES: {trade.location_id} on {trade.market_date} | "
-            f"Actual: {actual}° | Bucket: [{lo}, {hi}] | {'WIN 🏆' if won else 'LOSS ❌'} | PnL: ${trade.simulated_pnl}"
+            f"Actual: {actual}° | Bucket: [{lo}, {hi}) w={width} | {'WIN 🏆' if won else 'LOSS ❌'} | PnL: ${trade.simulated_pnl}"
         )
         settled += 1
 
