@@ -1,0 +1,14 @@
+{
+  "generated_at": "2026-06-15T11:05:10Z",
+  "window_months": 12,
+  "asof_day": 18,
+  "metric": "brier",
+  "providers": [
+    "ecmwf_ifs025",
+    "ecmwf_aifs025",
+    "gfs025",
+    "icon_seamless",
+    "gem_global"
+  ],
+  "cities": {}
+}

@@ -22,11 +22,16 @@ from dataclasses import dataclass
 from typing import Optional
 
 import httpx
+from sqlalchemy.exc import OperationalError
 
 from database_schema import PrecipStrategyTrade, init_database
 from execution.weather_executor import WeatherExecutor
 from polymarket_precip_dry_run import MONTHS, parse_precip_range
-from precip_forecast_pipeline import PRECIP_LOCATIONS, fetch_monthly_precip_forecast
+from precip_forecast_pipeline import (
+    PRECIP_LOCATIONS,
+    LIVE_PRECIP_PROVIDER_OVERRIDE,
+    fetch_monthly_precip_forecast,
+)
 
 GAMMA_EVENTS = "https://gamma-api.polymarket.com/events"
 CLOB_BASE = "https://clob.polymarket.com"
@@ -36,6 +41,14 @@ TRADE_DAY_WINDOW = (18, 20)
 TARGET_CITIES = ("seattle", "nyc")
 TRADE_SIZE_USD = 1.05  # slightly above $1 to avoid Polymarket rounding rejections
 MAX_YES_ENTRY_PRICE = 0.50
+
+# Provider-matrix accuracy gate (precip analogue of strategy.ts MAX_PROVIDER_MAE).
+# A multiclass Brier ~0.25 corresponds to roughly worse than ~65% bucket-hit.
+# NOTE: a NULL matrix_brier does NOT block (preserves pre-matrix behavior); only
+# an eligible cell whose Brier exceeds the gate blocks. Pooled/thin cells are
+# observation-only and blocked separately by the cold-start guard.
+MAX_PROVIDER_BRIER = 0.25
+MIN_MATRIX_SAMPLES = 8  # mirror precip_provider_backtest.MIN_SAMPLES
 
 
 @dataclass
@@ -244,7 +257,14 @@ def show_recent() -> None:
 
 
 def run(execute: bool = False) -> None:
-    session = init_database(auto_migrate=True)
+    # Try to ensure tables/columns exist, but don't let ALTER TABLE lock
+    # contention from live daemons abort a trade run — the schema is normally
+    # already migrated by setup / the launchd rebuild.
+    try:
+        session = init_database(auto_migrate=True)
+    except OperationalError:
+        print("⚠️  auto-migrate skipped (DB lock from live daemon) — using existing schema")
+        session = init_database(auto_migrate=False)
     executor = WeatherExecutor(
         trade_size_usdc=TRADE_SIZE_USD,
         dry_run=not execute,
@@ -260,8 +280,32 @@ def run(execute: bool = False) -> None:
             print(f"{loc_id}: no forecast")
             blocked += 1
             continue
-        if fc.get("model_name") and fc.get("model_name") != "ecmwf_ec46":
-            print(f"{loc_id}: model mismatch ({fc.get('model_name')})")
+        # Accept the configured live provider: an eligible matrix pick, the
+        # AIFS/ensemble override when set, or the seasonal ec46 default.
+        expected = {
+            fc.get("matrix_provider"),
+            LIVE_PRECIP_PROVIDER_OVERRIDE,
+            "ecmwf_ec46", "ecmwf_ifs_seasonal",
+        }
+        used_provider = fc.get("forecast_provider") or fc.get("model_name")
+        if used_provider and used_provider not in expected:
+            print(f"{loc_id}: provider mismatch (got {used_provider}, expected one of {sorted(x for x in expected if x)})")
+            blocked += 1
+            continue
+
+        # Provider-matrix accuracy gate: only an ELIGIBLE cell (non-null brier)
+        # can block, and only when its Brier exceeds the gate. A null brier means
+        # the matrix is cold for this city → do NOT block (pre-matrix behavior).
+        matrix_brier = fc.get("matrix_brier")
+        if matrix_brier is not None and matrix_brier > MAX_PROVIDER_BRIER:
+            print(f"{loc_id}: provider brier too high ({matrix_brier:.3f} > {MAX_PROVIDER_BRIER}) — skip")
+            blocked += 1
+            continue
+
+        # Cold-start guard: a pooled/thin matrix cell is observation-only and must
+        # never drive a live trade, even though it's captured for the matrix.
+        if fc.get("matrix_pooled") and fc.get("matrix_samples", 0) < MIN_MATRIX_SAMPLES:
+            print(f"{loc_id}: matrix cell pooled & thin (n={fc.get('matrix_samples')}) — observation-only, skip")
             blocked += 1
             continue
 

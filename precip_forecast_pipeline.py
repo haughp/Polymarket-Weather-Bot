@@ -29,12 +29,28 @@ from database_schema import (
     PrecipForecastCalibration,
     PrecipModelPerformance,
 )
+from precip_matrix import get_precip_provider, get_precip_brier, is_pooled, sample_count
 
 OPEN_METEO_ARCHIVE  = "https://archive-api.open-meteo.com/v1/archive"
 OPEN_METEO_FORECAST = "https://api.open-meteo.com/v1/forecast"
 OPEN_METEO_SEASONAL = "https://seasonal-api.open-meteo.com/v1/seasonal"
+OPEN_METEO_ENSEMBLE = "https://ensemble-api.open-meteo.com/v1/ensemble"
 ACIS_ENDPOINT       = "https://data.rcc-acis.org/StnData"
 METOFFICE_HEATHROW  = "https://www.metoffice.gov.uk/pub/data/weather/uk/climate/stationdata/heathrowdata.txt"
+
+# Which Open-Meteo endpoint serves per-member precip for a given model name.
+# Seasonal (ec46) is the historical default; the medium-range ENSEMBLE models
+# (ecmwf_ifs025 / ecmwf_aifs025 / gfs025 / icon_seamless / gem_global) reach the
+# 18-20d trade window with full member spread and are the provider-matrix source.
+# NOTE (verified 2026-06-15): the deterministic AIFS (ecmwf_aifs025_single) caps
+# at ~16 forecast days and cannot reach month-end on day 18 — only the AIFS
+# ENSEMBLE (ecmwf_aifs025) is usable for the [18,20] window.
+ENSEMBLE_API_MODELS = {
+    'ecmwf_ifs025', 'ecmwf_aifs025', 'gfs025', 'icon_seamless', 'gem_global',
+}
+# Override the live precip forecast provider for the current trade window.
+# Set to a model name to force it as the SOLE source; None = default (seasonal ec46).
+LIVE_PRECIP_PROVIDER_OVERRIDE = 'ecmwf_aifs025'  # 2026-06: AIFS-only this month (user directive)
 
 # 5 cities with active Polymarket monthly precipitation markets (confirmed Apr 2026)
 PRECIP_LOCATIONS = {
@@ -290,11 +306,16 @@ def fetch_ensemble_monthly_distribution(
     today: datetime.date,
     month_end: datetime.date,
     accumulated_mm: float,
+    model: str | None = None,
 ) -> tuple[float, float, float] | None:
     """
-    Query Open-Meteo seasonal API for an ensemble distribution of remaining-month
-    precipitation, then combine with accumulated actuals to return month-end
-    (p05, p50, p95) in mm.
+    Query Open-Meteo for an ensemble distribution of remaining-month precipitation,
+    then combine with accumulated actuals to return month-end (p05, p50, p95) in mm.
+
+    `model` selects the forecast source:
+      - None             → seasonal ECMWF ec46 (historical default).
+      - 'ecmwf_aifs025' / 'ecmwf_ifs025' / 'gfs025' / 'icon_seamless' / 'gem_global'
+                         → medium-range ENSEMBLE API (reaches the 18-20d window).
     """
     days_remaining = (month_end - today).days + 1
     if days_remaining <= 0:
@@ -302,16 +323,31 @@ def fetch_ensemble_monthly_distribution(
     if days_remaining > 46:
         return None
 
+    use_ensemble_api = model in ENSEMBLE_API_MODELS
+    if use_ensemble_api:
+        url = OPEN_METEO_ENSEMBLE
+        params = {
+            'latitude': obs['lat'],
+            'longitude': obs['lon'],
+            'daily': 'precipitation_sum',
+            'timezone': obs['timezone'],
+            'models': model,
+            'forecast_days': min(days_remaining + 2, 35),
+        }
+    else:
+        url = OPEN_METEO_SEASONAL
+        params = {
+            'latitude': obs['lat'],
+            'longitude': obs['lon'],
+            'daily': 'precipitation_sum',
+            'timezone': obs['timezone'],
+            'models': 'ecmwf_ifs',
+            'forecast_days': min(days_remaining + 2, 46),
+        }
+
     try:
         with httpx.Client(timeout=25) as client:
-            r = client.get(OPEN_METEO_SEASONAL, params={
-                'latitude': obs['lat'],
-                'longitude': obs['lon'],
-                'daily': 'precipitation_sum',
-                'timezone': obs['timezone'],
-                'models': 'ecmwf_ifs',
-                'forecast_days': min(days_remaining + 2, 46),
-            })
+            r = client.get(url, params=params)
             r.raise_for_status()
             daily = r.json().get('daily', {})
 
@@ -343,7 +379,8 @@ def fetch_ensemble_monthly_distribution(
             round(_quantile(totals, 0.95), 2),
         )
     except Exception as e:
-        print(f"   ⚠️  Seasonal ensemble API error: {e}")
+        src = 'ensemble' if use_ensemble_api else 'seasonal'
+        print(f"   ⚠️  {src} ensemble API error: {e}")
         return None
 
 
@@ -370,12 +407,22 @@ def fetch_monthly_precip_forecast(location_id: str, today: datetime.date | None 
 
     total_mm = accumulated_mm + forecast_mm
     band_source = "heuristic"
+    forecast_provider = None
     p50_mm = total_mm
-    ensemble_dist = fetch_ensemble_monthly_distribution(obs, today, month_end, accumulated_mm)
+    # Provider precedence:
+    #   1. eligible precip-matrix cell for this city (learned best provider)
+    #   2. LIVE_PRECIP_PROVIDER_OVERRIDE (manual single-model override, e.g. AIFS)
+    #   3. None → seasonal ec46 default
+    matrix_provider = get_precip_provider(location_id)
+    chosen_model = matrix_provider or LIVE_PRECIP_PROVIDER_OVERRIDE
+    ensemble_dist = fetch_ensemble_monthly_distribution(
+        obs, today, month_end, accumulated_mm, model=chosen_model
+    )
     if ensemble_dist is not None:
         p05_mm, p50_mm, p95_mm = ensemble_dist
         total_mm = p50_mm
-        band_source = "ecmwf_ensemble"
+        forecast_provider = chosen_model or 'ecmwf_ifs_seasonal'
+        band_source = f"ensemble:{forecast_provider}"
     else:
         p05_mm, p95_mm = compute_confidence_band(accumulated_mm, forecast_mm, days_elapsed, days_remaining)
 
@@ -404,7 +451,12 @@ def fetch_monthly_precip_forecast(location_id: str, today: datetime.date | None 
         'units':              units_label,
         'source':             actual_source,
         'band_source':        band_source,
-        'model_name':         MODEL_REGISTRY.get(location_id, {}).get('model_name', 'ecmwf_ec46'),
+        'forecast_provider':  forecast_provider,
+        'matrix_provider':    matrix_provider,                 # eligible matrix pick (None if cold)
+        'matrix_brier':       get_precip_brier(location_id),
+        'matrix_pooled':      is_pooled(location_id),
+        'matrix_samples':     sample_count(location_id),
+        'model_name':         forecast_provider or MODEL_REGISTRY.get(location_id, {}).get('model_name', 'ecmwf_ec46'),
         'model_rmse_mm':      MODEL_REGISTRY.get(location_id, {}).get('rmse_mm'),
         'model_auc':          MODEL_REGISTRY.get(location_id, {}).get('auc'),
         'model_eligible':     _eligible_model(

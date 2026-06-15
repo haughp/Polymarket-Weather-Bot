@@ -300,6 +300,58 @@ class PrecipModelPerformance(Base):
     created_at         = Column(DateTime, default=datetime.datetime.utcnow)
 
 
+class PrecipProviderForecast(Base):
+    """Day-18 month-end precipitation forecast captured per (city, provider).
+
+    Forward-capture target for the precipitation provider matrix. One row per
+    city/provider/month/asof_day from the Open-Meteo ENSEMBLE API. There is NO
+    archived precip-forecast source (verified 2026-06-15), so this table fills
+    going forward only — ~1 sample per city/provider/month.
+    """
+    __tablename__ = "precip_provider_forecasts"
+
+    id                = Column(Integer, primary_key=True, autoincrement=True)
+    captured_at       = Column(DateTime, default=datetime.datetime.utcnow, index=True)
+    location_id       = Column(String(32), index=True)
+    settlement_month  = Column(Date, index=True)         # first day of the month
+    asof_day          = Column(Integer, index=True)      # day-of-month the capture was taken (e.g. 18)
+    provider          = Column(String(40), index=True)   # ecmwf_ifs025 | ecmwf_aifs025 | gfs025 | icon_seamless | gem_global
+    accumulated_mm    = Column(Numeric(10, 3))           # actual precip days 1..asof_day-1 (mm)
+    remaining_p05_mm  = Column(Numeric(10, 3))           # ensemble p05 of remaining-month precip (mm)
+    remaining_p50_mm  = Column(Numeric(10, 3))           # ensemble p50 (mm)
+    remaining_p95_mm  = Column(Numeric(10, 3))           # ensemble p95 (mm)
+    total_forecast_mm = Column(Numeric(10, 3))           # accumulated + remaining_p50 (month-end total, mm)
+    n_members         = Column(Integer)                  # ensemble member count used
+    units             = Column(String(8))                # native city units (for reference; values stored in mm)
+    source            = Column(String(32))               # 'ensemble_capture' | 'seasonal_bootstrap'
+    created_at        = Column(DateTime, default=datetime.datetime.utcnow)
+
+
+class PrecipProviderPerformance(Base):
+    """Rolling per-(city, provider) accuracy summary backing each matrix cell.
+
+    Analogous to PrecipModelPerformance but keyed by provider and scored with
+    Brier-on-bucket-hit (primary) plus mae_mm / bias_mm / bucket_hit. `pooled`
+    flags a cell whose provider came from the cross-city pooled ranking (thin
+    per-city samples); `eligible` encodes data confidence AND sample maturity.
+    """
+    __tablename__ = "precip_provider_performance"
+
+    id            = Column(Integer, primary_key=True, autoincrement=True)
+    location_id   = Column(String(32), index=True)
+    provider      = Column(String(40), index=True)
+    window_months = Column(Integer, default=12)
+    samples       = Column(Integer, default=0)
+    brier         = Column(Numeric(8, 4))                # None for bootstrap-only (no ensemble spread)
+    mae_mm        = Column(Numeric(10, 3))
+    bias_mm       = Column(Numeric(10, 3))
+    bucket_hit    = Column(Numeric(6, 4))
+    pooled        = Column(Boolean, default=False)
+    eligible      = Column(Boolean, default=False)
+    evaluated_at  = Column(DateTime, default=datetime.datetime.utcnow, index=True)
+    created_at    = Column(DateTime, default=datetime.datetime.utcnow)
+
+
 class WeatherBotTsPosition(Base):
     """Open positions in the TS weather bot (live trading)."""
     __tablename__ = "weatherbot_ts_positions"
@@ -491,6 +543,12 @@ def migrate_schema(engine) -> None:
         ))
         conn.execute(text(
             "CREATE INDEX IF NOT EXISTS ix_wbss_snapshot_key ON weatherbot_signal_snapshots (snapshot_key)"
+        ))
+        # Idempotent capture for the precip provider matrix: one row per
+        # (city, month, provider, asof_day). Re-running day-19/20 no-ops.
+        conn.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_precip_provider_fc "
+            "ON precip_provider_forecasts (location_id, settlement_month, provider, asof_day)"
         ))
         conn.commit()
     with engine.connect() as conn:
