@@ -28,6 +28,20 @@ const MIN_YES_PRICE = 0.12;
 const PEAK_ENTRY_OPEN_H = 36;   // start entry window 36h before forecast peak
 const PEAK_ENTRY_CLOSE_H = 30;  // close entry window 30h before forecast peak
 
+// Per-city entry-window overrides [openH, closeH]. Atlanta's forecast peak is 23:00
+// local — the latest of any city — so its 36–30h window opens before the Polymarket
+// market is even listed and is already closed the first time the bot sees it (the
+// market never appeared earlier than ~26h to peak). A later [30, 24] window catches
+// the Atlanta listing. Only override cities listed here; everyone else uses the
+// global [36, 30] window. See memory project_weatherbot_atlanta_entry_window_miss.
+const ENTRY_WINDOW_OVERRIDES: Record<string, { openH: number; closeH: number }> = {
+  atlanta: { openH: 30, closeH: 24 },
+};
+
+function entryWindow(citySlug: string): { openH: number; closeH: number } {
+  return ENTRY_WINDOW_OVERRIDES[citySlug] ?? { openH: PEAK_ENTRY_OPEN_H, closeH: PEAK_ENTRY_CLOSE_H };
+}
+
 // Max provider forecast error (debiased MAE, °F) the matrix-chosen provider may carry
 // before we refuse to trade that city/mode. Polymarket buckets are 2°F wide, so a provider
 // whose typical error exceeds this cannot reliably land in the right bucket. Cells with no
@@ -416,6 +430,7 @@ export async function run(options: RunOptions): Promise<void> {
         }
         const peakDt = new Date(peakTimeStr);
         const hoursToPeak = (peakDt.getTime() - Date.now()) / (1000 * 3600);
+        const { openH: entryOpenH, closeH: entryCloseH } = entryWindow(citySlug);
 
         const localFormatter = new Intl.DateTimeFormat('en-US', {
           hour: '2-digit',
@@ -435,19 +450,19 @@ export async function run(options: RunOptions): Promise<void> {
                   : `${forecastTemp}°F`, "cyan"),
                 stat("Peak time", `${localPeakStr} local`, "blue"),
                 stat("Hours to peak", `${hoursToPeak.toFixed(1)}h`,
-                  (hoursToPeak < PEAK_ENTRY_CLOSE_H || hoursToPeak > PEAK_ENTRY_OPEN_H) ? "red" : "green"),
-                stat("Entry window", `${PEAK_ENTRY_CLOSE_H}–${PEAK_ENTRY_OPEN_H}h before peak`, "blue")
+                  (hoursToPeak < entryCloseH || hoursToPeak > entryOpenH) ? "red" : "green"),
+                stat("Entry window", `${entryCloseH}–${entryOpenH}h before peak`, "blue")
               ],
               "blue"
             )
         );
 
-        if (hoursToPeak > PEAK_ENTRY_OPEN_H) {
-          skip(`Too early — ${hoursToPeak.toFixed(1)}h to peak (entry opens at ${PEAK_ENTRY_OPEN_H}h)`);
+        if (hoursToPeak > entryOpenH) {
+          skip(`Too early — ${hoursToPeak.toFixed(1)}h to peak (entry opens at ${entryOpenH}h)`);
           continue;
         }
-        if (hoursToPeak < PEAK_ENTRY_CLOSE_H) {
-          skip(`Entry window closed — peak in ${hoursToPeak.toFixed(1)}h (window was ${PEAK_ENTRY_CLOSE_H}–${PEAK_ENTRY_OPEN_H}h)`);
+        if (hoursToPeak < entryCloseH) {
+          skip(`Entry window closed — peak in ${hoursToPeak.toFixed(1)}h (window was ${entryCloseH}–${entryOpenH}h)`);
           continue;
         }
 
