@@ -88,6 +88,13 @@ LOCATION_TIMEZONES = {
 
 SIM_SIZE_USD = 5.0
 
+# Dual-bucket entry price gates (mirror weatherbot-ts src/strategy.ts).
+# Floor applies to the neighbour only — the forecast-centre bucket F is always
+# kept regardless of price. Ceiling applies to both legs (a forecast-centre
+# priced above it makes the dual entry −EV → abort).
+BUCKET_MIN_PRICE = 0.12
+BUCKET_MAX_PRICE = 0.35
+
 # Per-location, per-mode ECMWF forecast bias correction.
 # Convention: bias = (expected_actual − ecmwf_forecast).
 #   Positive → ECMWF runs cold (actual warmer) → shift bucket selection up.
@@ -369,6 +376,70 @@ def classify_markets(
     return {'candidates': candidates, 'top2': candidates[:2]}
 
 
+def select_entry_pair(
+    candidates: list[dict],
+    corrected_temp: float,
+    min_price: float,
+    max_price: float,
+) -> dict:
+    """F + higher-priced-neighbour entry selection (ported from weatherbot-ts).
+
+    Buy the forecast-centre bucket F (the bucket whose half-open interval contains
+    `corrected_temp`) plus the single adjacent neighbour (F±width) the MARKET prices
+    higher. `candidates` are classify_markets() dicts (carry range/width/yes_price).
+
+    Price gates (mirror weatherbot-ts):
+      - floor (min_price) applies to the NEIGHBOUR only — F is always kept, even
+        when priced below the floor (dropping the cheap-but-correct forecast bucket
+        was the 2026-06-14 Dallas loss).
+      - ceiling (max_price) applies to BOTH legs — a forecast-centre priced above
+        the ceiling makes the dual entry −EV, so abort the city (no cheaper-neighbour
+        fallback, per spec).
+
+    Returns {"ok": True, "pair": [F, neighbour]} (F first) or
+            {"ok": False, "reason": str}.
+    """
+    F = next(
+        (c for c in candidates if bucket_contains(c['range'][0], c['range'][1], c['width'], corrected_temp)),
+        None,
+    )
+    if F is None:
+        return {"ok": False, "reason": f"forecast {corrected_temp:.1f}° outside all listed buckets"}
+
+    f_lo, f_hi = F['range']
+    width = F['width']
+    # Neighbour lower bounds, by arithmetic on the half-open grid. A finite F has
+    # lo and hi=lo+width; its neighbours start at f_lo-width (below) and f_hi (above).
+    # A tail F has only one open side: "or higher" (lo set, hi None) → lower neighbour
+    # ends at f_lo; "or below" (lo None, hi set) → upper neighbour starts at f_hi.
+    def _is_neighbour(c: dict) -> bool:
+        c_lo, c_hi = c['range']
+        if c is F:
+            return False
+        if f_lo is not None and f_hi is not None:       # finite F
+            return c_lo == f_lo - (width or 0) or c_lo == f_hi
+        if f_lo is not None:                            # "or higher" tail → neighbour just below
+            return c_hi == f_lo
+        return c_lo == f_hi                             # "or below" tail → neighbour just above
+
+    neighbours = [c for c in candidates if _is_neighbour(c)]
+    if not neighbours:
+        return {"ok": False, "reason": f"no neighbour bucket adjacent to F {F['range']}"}
+
+    # Higher YES price wins — "let the market decide".
+    neighbour = max(neighbours, key=lambda c: c['yes_price'] if c['yes_price'] is not None else 0.0)
+
+    # Ceiling applies to both legs; floor to the neighbour only.
+    if F['yes_price'] is not None and F['yes_price'] > max_price:
+        return {"ok": False, "reason": f"forecast bucket price ${F['yes_price']:.3f} > ceiling ${max_price}"}
+    if neighbour['yes_price'] > max_price:
+        return {"ok": False, "reason": f"neighbour price ${neighbour['yes_price']:.3f} > ceiling ${max_price}"}
+    if neighbour['yes_price'] < min_price:
+        return {"ok": False, "reason": f"neighbour price ${neighbour['yes_price']:.3f} < floor ${min_price}"}
+
+    return {"ok": True, "pair": [F, neighbour]}
+
+
 # ── Price / book helpers ───────────────────────────────────────────────────────
 
 def extract_prices(market: dict | None) -> tuple[float | None, float | None]:
@@ -498,29 +569,35 @@ def record_dry_run(forecast: dict, session) -> None:
           f"({location_id}/{mode}, source={source})")
     classified = classify_markets(markets, corrected_temp)
     candidates = classified['candidates']
-    top2 = classified['top2']
 
     if not candidates:
         print(f"   ⚠️  No markets parsed to a temperature bucket")
         return
 
-    if len(top2) < 2:
-        print(f"   ⚠️  Only {len(top2)} candidate(s) parsed — need 2 for dual-bucket — skip")
+    # ── F + higher-priced-neighbour selection (ported from weatherbot-ts) ─────
+    # Buy the forecast-centre bucket F + the adjacent neighbour the market prices
+    # higher. F is exempt from the price floor; ceiling applies to both legs.
+    selection = select_entry_pair(
+        candidates, corrected_temp,
+        min_price=BUCKET_MIN_PRICE, max_price=BUCKET_MAX_PRICE,
+    )
+    if not selection['ok']:
+        print(f"   ⏭️  Selection: {selection['reason']}")
         return
+    pair = selection['pair']
 
-    print(f"   ℹ️  Found {len(candidates)} markets; top 2 closest to forecast:")
-    for c in candidates:
-        marker = '➡️' if c in top2 else '  '
+    def _rng_label(c):
         rng = c['range']
-        rng_label = f"[{rng[0]}, {rng[1]}]" if rng[0] is not None and rng[1] is not None else (
-            f"≤{rng[1]}" if rng[0] is None else f"≥{rng[0]}"
-        )
-        print(f"   {marker} d={c['distance']:.2f}° mid={c['midpoint']} {rng_label}  "
-              f"q={c['question'][:50]}")
+        return (f"[{rng[0]}, {rng[1]}]" if rng[0] is not None and rng[1] is not None
+                else (f"≤{rng[1]}" if rng[0] is None else f"≥{rng[0]}"))
+
+    print(f"   ℹ️  Found {len(candidates)} markets; selected F + higher-priced neighbour:")
+    print(f"      F        {_rng_label(pair[0])} yes=${pair[0]['yes_price']:.3f}  q={pair[0]['question'][:50]}")
+    print(f"      neighbour {_rng_label(pair[1])} yes=${pair[1]['yes_price']:.3f}  q={pair[1]['question'][:50]}")
 
     # ── Pre-fetch tokens + asks for both legs, then gate as a pair ────────────
     legs = []
-    for idx, cand in enumerate(top2):
+    for idx, cand in enumerate(pair):
         mkt = cand['market']
         tok_yes = clob_yes_token(mkt)
         if not tok_yes:
@@ -562,7 +639,7 @@ def record_dry_run(forecast: dict, session) -> None:
             market_date=target_date,
             clob_token_id=leg['tok_yes'],
             question_text=leg['mkt'].get('question', '')[:512],
-            market_side='top2_closest',
+            market_side=('F' if leg['idx'] == 1 else 'neighbour'),
             order_type='YES',
             price=leg['yes_ask'],
             size=SIM_SIZE_USD,
@@ -570,7 +647,8 @@ def record_dry_run(forecast: dict, session) -> None:
             simulated_pnl=None,
         )
         session.add(sim)
-        print(f"   📝 Leg {leg['idx']}: distance={leg['cand']['distance']:.2f}° ask=${leg['yes_ask']:.3f} "
+        tag = 'F' if leg['idx'] == 1 else 'neighbour'
+        print(f"   📝 Leg {leg['idx']} ({tag}): distance={leg['cand']['distance']:.2f}° ask=${leg['yes_ask']:.3f} "
               f"cost=${SIM_SIZE_USD:.2f} payout=${payout:.2f}  q={leg['mkt'].get('question','')[:50]}")
 
 
