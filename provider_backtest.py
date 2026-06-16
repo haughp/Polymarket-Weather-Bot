@@ -240,9 +240,23 @@ MATRIX_PATH = os.path.join(os.path.dirname(__file__), "provider_matrix.json")
 MAX_ABS_BIAS_F = 4.0
 MAX_ABS_BIAS_C = 2.0
 
+# Debiased-MAE cap (in the city's native unit) a provider must clear to be selected.
+# A provider whose typical error after debiasing exceeds ~one bucket cannot reliably
+# land in the right bucket, so it is dropped and the next-smallest-MAE eligible provider
+# takes the slot — falling through to "no cell" only when NONE clear it (the runtime gate
+# then skips the city). Added 2026-06-16 after NYC + Dallas June-15 losses where the
+# matrix-chosen provider's mae_debiased of 1.6–1.9°F still traded and missed by a bucket.
+#   US (°F): 1.5°F.  Non-US (°C): 1.0°C.
+MAX_MAE_F = 1.5
+MAX_MAE_C = 1.0
+
 
 def max_abs_bias_for(unit: str) -> float:
     return MAX_ABS_BIAS_C if unit == "C" else MAX_ABS_BIAS_F
+
+
+def max_mae_for(unit: str) -> float:
+    return MAX_MAE_C if unit == "C" else MAX_MAE_F
 
 
 def build_matrix(results, incumbent: dict, min_samples: int = 5,
@@ -255,7 +269,7 @@ def build_matrix(results, incumbent: dict, min_samples: int = 5,
     track regime shifts, so we deliberately do NOT keep an incumbent. The
     `incumbent` arg is retained only so the report can flag CHANGED cells.
 
-    Gates (a provider must clear BOTH to be eligible):
+    Gates (a provider must clear ALL THREE to be eligible):
       - sample gate: >= min_samples (default 5) forecast/actual pairs.
       - bias gate: |bias| <= cap, where cap is per the city's native unit
         (4°F US, 2°C non-US — see max_abs_bias_for). This is a real selection
@@ -263,6 +277,10 @@ def build_matrix(results, incumbent: dict, min_samples: int = 5,
         |bias| exceeds the cap it is skipped and the next-smallest-MAE provider
         under the cap takes the slot (e.g. Miami max: AIFS MAE 0.85 / bias +4.97
         dropped for GFS MAE 0.96 / +1.49).
+      - MAE gate: mae_debiased <= mae_cap (1.5°F US, 1.0°C non-US — see
+        max_mae_for). Same substitution logic: the lowest-MAE provider that also
+        clears this cap wins; if even the best provider exceeds it, no provider is
+        eligible and no cell is written (the runtime gate then skips that city).
     A city/mode where NO provider clears both gates writes NO cell — getMae()
     then returns null in the bot, which means "don't gate, fall back to
     FORECAST_PROVIDER" (e.g. NWS, which has no archive and only accrues samples
@@ -277,15 +295,22 @@ def build_matrix(results, incumbent: dict, min_samples: int = 5,
     for city, modes in results.items():
         unit = city_units.get(city, "F")
         cap = max_abs_bias_for(unit)
+        mae_cap = max_mae_for(unit)
         cities_out.setdefault(city, {})
         for mode, model_scores in modes.items():
             if not model_scores:
                 continue
-            # Lowest debiased MAE among providers clearing the sample + bias gates.
+            # Lowest debiased MAE among providers clearing the sample + bias + MAE gates.
+            # The MAE gate is a selection criterion, not just a runtime backstop: if the
+            # smallest-MAE provider still exceeds mae_cap it is skipped and the next-best
+            # ELIGIBLE provider takes the slot. Only when no provider clears all three
+            # gates is no cell written (the runtime gate then skips the city).
             ranked = sorted(model_scores.items(), key=lambda kv: kv[1]["mae_debiased"])
             best_model, best_metrics = next(
                 ((m, s) for m, s in ranked
-                 if s["n"] >= min_samples and abs(s["bias"]) <= cap),
+                 if s["n"] >= min_samples
+                 and abs(s["bias"]) <= cap
+                 and s["mae_debiased"] <= mae_cap),
                 (None, None)
             )
             if best_model is None:

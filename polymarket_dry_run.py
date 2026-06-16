@@ -95,6 +95,14 @@ SIM_SIZE_USD = 5.0
 BUCKET_MIN_PRICE = 0.12
 BUCKET_MAX_PRICE = 0.35
 
+# Provider-accuracy gate (mirror weatherbot-ts src/strategy.ts, added 2026-06-16).
+# Refuse to trade a city/mode whose matrix provider carries a debiased MAE wider than
+# one bucket. Unit-specific: US markets quote 2°F buckets, non-US markets quote 1°C
+# buckets, so the °C ceiling is tighter. A city with NO usable matrix MAE is treated as
+# unproven and SKIPPED (we do not trade a provider whose error is unmeasured).
+MAX_PROVIDER_MAE_F = 1.5
+MAX_PROVIDER_MAE_C = 1.0
+
 # Per-location, per-mode ECMWF forecast bias correction.
 # Convention: bias = (expected_actual − ecmwf_forecast).
 #   Positive → ECMWF runs cold (actual warmer) → shift bucket selection up.
@@ -541,13 +549,31 @@ def record_dry_run(forecast: dict, session) -> None:
     # A mis-keyed cell (e.g. a °C bias landing on a °F forecast) would silently
     # corrupt bucket selection — so on mismatch we ignore the cell and fall
     # through to static/0. Cells without a unit (legacy) are treated as matching.
+    fc_unit = "C" if forecast['units'] == 'celsius' else "F"
     if matrix_cell is not None:
         cell_unit = matrix_cell.get("unit")
-        fc_unit = "C" if forecast['units'] == 'celsius' else "F"
         if cell_unit is not None and cell_unit != fc_unit:
             print(f"   ⚠️  matrix cell unit {cell_unit} != forecast unit {fc_unit} "
                   f"for {location_id}/{mode} — ignoring matrix bias")
             matrix_cell = None
+
+    # ── Provider-accuracy gate ────────────────────────────────────────────────
+    # Skip the city/mode unless its matrix provider has a measured debiased MAE
+    # within one bucket (unit-specific). No usable cell/MAE → unproven → skip.
+    mae = None
+    if matrix_cell is not None:
+        mae = matrix_cell.get("mae_debiased")
+        if not isinstance(mae, (int, float)):
+            mae = matrix_cell.get("mae")
+    if not isinstance(mae, (int, float)):
+        print(f"   ⏭️  No proven provider MAE for {location_id}/{mode} — unproven, skipping")
+        return
+    mae_gate = MAX_PROVIDER_MAE_C if fc_unit == "C" else MAX_PROVIDER_MAE_F
+    if mae > mae_gate:
+        print(f"   ⏭️  Provider MAE too high for {location_id}/{mode} — "
+              f"{mae:.2f}°{fc_unit} > {mae_gate}°{fc_unit} gate — skipping")
+        return
+
     if mode in LIVE_BIAS_N.get(location_id, {}):
         # Live outcome-based bias always wins (highest priority)
         bias = LIVE_BIAS.get(location_id, {}).get(mode, 0.0)

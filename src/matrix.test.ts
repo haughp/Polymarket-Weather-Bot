@@ -6,7 +6,7 @@
 
 import assert from "assert";
 import * as nws from "./nws";
-import { getProvider, getBias, getMae } from "./matrix";
+import { getProvider, getBias, getMae, getUnit } from "./matrix";
 
 // The matrix loaded by matrix.ts comes from ../provider_matrix.json (real file). These
 // tests assert behavior against whatever cells that file currently holds, plus the
@@ -33,10 +33,15 @@ function test(name: string, fn: () => void | Promise<void>) {
 }
 
 // Replicate the strategy.ts gate so we test the actual decision, not a paraphrase.
-const MAX_PROVIDER_MAE = 2.5;
+// Unit-specific thresholds; a city with NO matrix MAE is treated as unproven → SKIP.
+const MAX_PROVIDER_MAE_F = 1.5;
+const MAX_PROVIDER_MAE_C = 1.0;
 function gateSkips(city: string, mode: "highest" | "lowest"): boolean {
   const mae = getMae(city, mode);
-  return mae != null && mae > MAX_PROVIDER_MAE;
+  if (mae == null) return true; // unproven → skip
+  const unit = getUnit(city, mode) ?? "F";
+  const gate = unit === "C" ? MAX_PROVIDER_MAE_C : MAX_PROVIDER_MAE_F;
+  return mae > gate;
 }
 
 async function main() {
@@ -76,15 +81,17 @@ async function main() {
     assert.strictEqual(getMae(city, "highest"), c.max.mae_debiased);
   });
 
-  await test("getMae returns null for an unmatrixed city (so the gate does NOT skip it)", () => {
+  await test("getMae returns null for an unmatrixed city, and the gate now SKIPS it (unproven)", () => {
     assert.strictEqual(getMae("__no_such_city__", "highest"), null);
-    assert.strictEqual(gateSkips("__no_such_city__", "highest"), false);
+    assert.strictEqual(getUnit("__no_such_city__", "highest"), null);
+    assert.strictEqual(gateSkips("__no_such_city__", "highest"), true);
   });
 
   // ── MAE gate decision ──────────────────────────────────────────────────────
-  await test("MAE gate skips a city/mode whose debiased MAE exceeds the 2.5°F threshold", () => {
-    // Find the worst cell in the deployed matrix; if any exceed 2.5 they must be gated,
-    // and every cell at/under 2.5 must NOT be gated.
+  await test("MAE gate skips a city/mode whose debiased MAE exceeds the unit-specific threshold", () => {
+    // Every cell is gated against its own unit's threshold (1.5°F / 1.0°C). A cell at/under
+    // its threshold must NOT be gated; one above it must be. Cells with no usable MAE are
+    // skipped (unproven), matching the live gate.
     let anyOverThreshold = false;
     for (const [city, cell] of Object.entries<any>(MATRIX.cities ?? {})) {
       for (const [mode, mkt] of [["max", "highest"], ["min", "lowest"]] as const) {
@@ -92,11 +99,13 @@ async function main() {
         if (!c) continue;
         const mae = typeof c.mae_debiased === "number" ? c.mae_debiased : c.mae;
         if (typeof mae !== "number") continue;
-        const expectSkip = mae > MAX_PROVIDER_MAE;
+        const unit = c.unit === "C" ? "C" : "F";
+        const gate = unit === "C" ? MAX_PROVIDER_MAE_C : MAX_PROVIDER_MAE_F;
+        const expectSkip = mae > gate;
         if (expectSkip) anyOverThreshold = true;
         assert.strictEqual(
           gateSkips(city, mkt), expectSkip,
-          `${city} ${mkt} mae=${mae} expectSkip=${expectSkip}`
+          `${city} ${mkt} mae=${mae}°${unit} gate=${gate} expectSkip=${expectSkip}`
         );
       }
     }

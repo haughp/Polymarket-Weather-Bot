@@ -2,7 +2,7 @@ import { buyYesFok, fetchAskPrice, getClobClient, sellYesLimit } from "./clob";
 import { BotConfig, getActiveLocations } from "./config";
 import { badge, C, divider, info, ok, panel, progressBar, skip, stat, warn } from "./colors";
 import { DailyForecasts, FORECAST_BIAS, LOCATIONS, getForecast } from "./nws";
-import { getBias, getMae } from "./matrix";
+import { getBias, getMae, getUnit } from "./matrix";
 import { parseTempRange, bucketMidpoint } from "./parsing";
 import { selectEntryPair } from "./selection";
 import {
@@ -43,11 +43,15 @@ function entryWindow(citySlug: string): { openH: number; closeH: number } {
   return ENTRY_WINDOW_OVERRIDES[citySlug] ?? { openH: PEAK_ENTRY_OPEN_H, closeH: PEAK_ENTRY_CLOSE_H };
 }
 
-// Max provider forecast error (debiased MAE, °F) the matrix-chosen provider may carry
-// before we refuse to trade that city/mode. Polymarket buckets are 2°F wide, so a provider
-// whose typical error exceeds this cannot reliably land in the right bucket. Cells with no
-// matrix entry (getMae → null) are NOT gated, preserving pre-matrix behavior.
-const MAX_PROVIDER_MAE = 2.5;
+// Max provider forecast error (debiased MAE) the matrix-chosen provider may carry before we
+// refuse to trade that city/mode. Unit-specific: US markets quote 2°F buckets, non-US markets
+// quote 1°C buckets (≈1.8°F), so the °C ceiling is tighter. A provider whose typical error
+// exceeds these cannot reliably land in the right bucket. Tightened 2026-06-16 (was a single
+// 2.5°F gate) after NYC + Dallas June-15 losses where mae_debiased 1.6–1.9°F still traded and
+// missed by a bucket. Cities with NO matrix cell (getMae → null) are now SKIPPED, not traded:
+// an unproven provider is not trusted.
+const MAX_PROVIDER_MAE_F = 1.5;
+const MAX_PROVIDER_MAE_C = 1.0;
 
 export type TradeMode = "dry-run" | "paper" | "execute";
 
@@ -407,10 +411,18 @@ export async function run(options: RunOptions): Promise<void> {
         const adjustedForecastTemp = forecastTemp + biasOffset;
 
         // Provider-accuracy gate: if the matrix's chosen provider for this city/mode has a
-        // debiased MAE wider than one ~2°F bucket, no bucket pick is reliable — skip.
+        // debiased MAE wider than one bucket, no bucket pick is reliable — skip. The threshold
+        // is unit-specific (°F vs °C). A city with NO matrix cell is treated as unproven and
+        // SKIPPED rather than traded through.
         const providerMae = getMae(citySlug, marketMode);
-        if (providerMae != null && providerMae > MAX_PROVIDER_MAE) {
-          skip(`Provider MAE too high for ${citySlug} ${marketMode} — ${providerMae.toFixed(2)}°F > ${MAX_PROVIDER_MAE}°F gate`);
+        if (providerMae == null) {
+          skip(`No proven provider MAE for ${citySlug} ${marketMode} — unproven, skipping`);
+          continue;
+        }
+        const maeUnit = getUnit(citySlug, marketMode) ?? "F";
+        const maeGate = maeUnit === "C" ? MAX_PROVIDER_MAE_C : MAX_PROVIDER_MAE_F;
+        if (providerMae > maeGate) {
+          skip(`Provider MAE too high for ${citySlug} ${marketMode} — ${providerMae.toFixed(2)}°${maeUnit} > ${maeGate}°${maeUnit} gate`);
           continue;
         }
 

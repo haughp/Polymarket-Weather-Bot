@@ -1,28 +1,9 @@
 {
-  "generated_at": "2026-06-16T10:11:23Z",
+  "generated_at": "2026-06-16T19:14:51Z",
   "window_days": 7,
   "lead_days": 1,
   "cities": {
-    "nyc": {
-      "max": {
-        "provider": "gfs_seamless",
-        "bias": -0.49,
-        "mae": 1.74,
-        "mae_debiased": 1.67,
-        "samples": 7,
-        "unit": "F",
-        "max_abs_bias": 4.0
-      },
-      "min": {
-        "provider": "ecmwf_aifs025_single",
-        "bias": 2.03,
-        "mae": 2.11,
-        "mae_debiased": 1.65,
-        "samples": 7,
-        "unit": "F",
-        "max_abs_bias": 4.0
-      }
-    },
+    "nyc": {},
     "chicago": {
       "max": {
         "provider": "ecmwf_aifs025_single",
@@ -63,26 +44,7 @@
         "max_abs_bias": 4.0
       }
     },
-    "dallas": {
-      "max": {
-        "provider": "gem_seamless",
-        "bias": -0.71,
-        "mae": 2.17,
-        "mae_debiased": 1.69,
-        "samples": 7,
-        "unit": "F",
-        "max_abs_bias": 4.0
-      },
-      "min": {
-        "provider": "ecmwf_aifs025_single",
-        "bias": -0.5,
-        "mae": 1.7,
-        "mae_debiased": 1.91,
-        "samples": 7,
-        "unit": "F",
-        "max_abs_bias": 4.0
-      }
-    },
+    "dallas": {},
     "seattle": {
       "max": {
         "provider": "ncep_nbm_conus",
@@ -152,15 +114,6 @@
         "samples": 7,
         "unit": "F",
         "max_abs_bias": 4.0
-      },
-      "min": {
-        "provider": "gfs_seamless",
-        "bias": -1.43,
-        "mae": 2.34,
-        "mae_debiased": 1.78,
-        "samples": 7,
-        "unit": "F",
-        "max_abs_bias": 4.0
       }
     },
     "los-angeles": {
@@ -175,15 +128,6 @@
       }
     },
     "san-francisco": {
-      "max": {
-        "provider": "ecmwf_aifs025_single",
-        "bias": 2.97,
-        "mae": 2.97,
-        "mae_debiased": 3.22,
-        "samples": 7,
-        "unit": "F",
-        "max_abs_bias": 4.0
-      },
       "min": {
         "provider": "icon_seamless",
         "bias": 1.24,
@@ -283,15 +227,6 @@
         "samples": 7,
         "unit": "C",
         "max_abs_bias": 2.0
-      },
-      "min": {
-        "provider": "gem_seamless",
-        "bias": -0.17,
-        "mae": 1.0,
-        "mae_debiased": 1.02,
-        "samples": 7,
-        "unit": "C",
-        "max_abs_bias": 2.0
       }
     },
     "london": {
@@ -335,15 +270,6 @@
       }
     },
     "taipei": {
-      "max": {
-        "provider": "ukmo_seamless",
-        "bias": 0.26,
-        "mae": 0.97,
-        "mae_debiased": 1.01,
-        "samples": 7,
-        "unit": "C",
-        "max_abs_bias": 2.0
-      },
       "min": {
         "provider": "gfs_seamless",
         "bias": 0.37,
@@ -400,15 +326,6 @@
         "bias": 1.97,
         "mae": 1.97,
         "mae_debiased": 0.48,
-        "samples": 7,
-        "unit": "C",
-        "max_abs_bias": 2.0
-      },
-      "min": {
-        "provider": "gem_seamless",
-        "bias": -0.16,
-        "mae": 1.47,
-        "mae_debiased": 1.45,
         "samples": 7,
         "unit": "C",
         "max_abs_bias": 2.0
@@ -515,15 +432,6 @@
       }
     },
     "chongqing": {
-      "max": {
-        "provider": "ecmwf_aifs025_single",
-        "bias": -0.06,
-        "mae": 1.14,
-        "mae_debiased": 1.15,
-        "samples": 7,
-        "unit": "C",
-        "max_abs_bias": 2.0
-      },
       "min": {
         "provider": "ecmwf_aifs025_single",
         "bias": -1.27,
@@ -532,26 +440,6 @@
         "samples": 7,
         "unit": "C",
         "max_abs_bias": 2.0
-      }
-    },
-    "new_york": {
-      "max": {
-        "provider": "gfs_seamless",
-        "bias": -0.49,
-        "mae": 1.74,
-        "mae_debiased": 1.67,
-        "samples": 7,
-        "unit": "F",
-        "max_abs_bias": 4.0
-      },
-      "min": {
-        "provider": "ecmwf_aifs025_single",
-        "bias": 2.03,
-        "mae": 2.11,
-        "mae_debiased": 1.65,
-        "samples": 7,
-        "unit": "F",
-        "max_abs_bias": 4.0
       }
     }
   }

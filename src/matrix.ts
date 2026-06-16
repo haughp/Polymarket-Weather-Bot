@@ -8,6 +8,7 @@ export interface ProviderCell {
   mae: number;
   mae_debiased: number;
   samples: number;
+  unit?: string; // "F" | "C" — the temperature unit this cell was calibrated in
 }
 
 export interface ProviderMatrix {
@@ -58,12 +59,13 @@ export function getBias(citySlug: string, marketMode: "highest" | "lowest"): num
 }
 
 /**
- * Returns the chosen provider's forecast error for (city, mode), in °F.
+ * Returns the chosen provider's forecast error for (city, mode), in the cell's unit.
  * Prefers `mae_debiased` — the error AFTER the matrix bias is removed — because
  * strategy.ts applies getBias() before bucket selection, so the debiased error is
- * what actually governs whether the forecast lands in the right 2°F bucket. Falls
- * back to raw `mae`, then null when no matrix cell exists (caller must NOT skip on
- * null — that preserves pre-matrix behavior for unmatrixed cities).
+ * what actually governs whether the forecast lands in the right bucket. Falls back
+ * to raw `mae`, then null when no matrix cell exists or the cell carries no usable
+ * error figure. The MAE gate now SKIPS on null (a city with no proven error figure
+ * is treated as unproven), so callers should gate on null rather than trade through.
  */
 export function getMae(citySlug: string, marketMode: "highest" | "lowest"): number | null {
   const mode = marketMode === "highest" ? "max" : "min";
@@ -73,4 +75,18 @@ export function getMae(citySlug: string, marketMode: "highest" | "lowest"): numb
   if (typeof cell.mae_debiased === "number") return cell.mae_debiased;
   if (typeof cell.mae === "number") return cell.mae;
   return null;
+}
+
+/**
+ * Returns the matrix cell's calibration unit ("F" | "C") for (city, mode), or null
+ * when no cell exists. Cells without an explicit `unit` default to "F" (every such
+ * legacy cell in the matrix is a US city). Used to pick the unit-specific MAE gate
+ * threshold (tighter °C ceiling for the smaller non-US buckets).
+ */
+export function getUnit(citySlug: string, marketMode: "highest" | "lowest"): "F" | "C" | null {
+  const mode = marketMode === "highest" ? "max" : "min";
+  const m = loadMatrix();
+  const cell = m?.cities?.[citySlug]?.[mode];
+  if (!cell) return null;
+  return cell.unit === "C" ? "C" : "F";
 }
