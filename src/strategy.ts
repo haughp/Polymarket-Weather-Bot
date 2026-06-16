@@ -4,6 +4,7 @@ import { badge, C, divider, info, ok, panel, progressBar, skip, stat, warn } fro
 import { DailyForecasts, FORECAST_BIAS, LOCATIONS, getForecast } from "./nws";
 import { getBias, getMae } from "./matrix";
 import { parseTempRange, bucketMidpoint } from "./parsing";
+import { selectEntryPair } from "./selection";
 import {
   PolymarketEvent,
   PolymarketMarket,
@@ -474,46 +475,47 @@ export async function run(options: RunOptions): Promise<void> {
           midpointDistance: number;
         }
 
-        const candidateBuckets: ScoredBucket[] = [];
+        // Price gate bounds. Floor (min) applies to the NEIGHBOR only — F (the
+        // forecast-center bucket) is always kept regardless of price; the
+        // ceiling (max) applies to both legs.
+        const DUAL_BUCKET_MIN_PRICE = MIN_YES_PRICE;
+        const DUAL_BUCKET_MAX_PRICE = 0.35;
 
+        // Parse every market to {range, price} WITHOUT a floor filter (the floor
+        // is enforced neighbour-only inside selectEntryPair). Keep the index so
+        // we can recover the originating market/question after selection.
+        const parsed: { market: PolymarketMarket; question: string; range: [number, number]; price: number }[] = [];
         for (const market of event.markets ?? []) {
           const question = market.question ?? "";
           const rng = parseTempRange(question);
           if (!rng) continue;
-
+          let yesPrice = NaN;
           try {
-            const pricesStr = market.outcomePrices ?? "[0.5,0.5]";
-            const prices = JSON.parse(pricesStr) as number[];
-            const yesPrice = Number(prices[0]);
-            if (!isFinite(yesPrice) || yesPrice < MIN_YES_PRICE) continue;
-
-            const midpoint = bucketMidpoint(rng);
-            const midpointDistance = Math.abs(midpoint - adjustedForecastTemp);
-            candidateBuckets.push({ market, question, price: yesPrice, range: rng, midpointDistance });
+            const prices = JSON.parse(market.outcomePrices ?? "[0.5,0.5]") as number[];
+            yesPrice = Number(prices[0]);
           } catch {
-            continue;
+            yesPrice = NaN;
           }
+          parsed.push({ market, question, range: rng, price: yesPrice });
         }
 
-        // Sort by midpoint distance (closest to forecast first)
-        candidateBuckets.sort((a, b) => a.midpointDistance - b.midpointDistance);
-        const topBuckets = candidateBuckets.slice(0, 2);
-
-        if (topBuckets.length < 2) {
-          skip(`Need 2 buckets near ${forecastTemp}°F — found ${topBuckets.length}`);
+        // Select F + the higher-priced neighbour (F+1 / F−1), "let the market decide".
+        const selection = selectEntryPair(parsed, adjustedForecastTemp, {
+          minPrice: DUAL_BUCKET_MIN_PRICE,
+          maxPrice: DUAL_BUCKET_MAX_PRICE,
+        });
+        if (!selection.ok) {
+          skip(`Selection: ${selection.reason}`);
           continue;
         }
-
-        // City-level gate: BOTH top buckets must be in [MIN_YES_PRICE, 0.35] or abort entire city.
-        // Floor is required to ensure we don't catch falling knives if the market strongly disagrees.
-        // Ceiling is 0.35 to ensure positive Expected Value for the dual-entry setup.
-        const DUAL_BUCKET_MIN_PRICE = MIN_YES_PRICE;
-        const DUAL_BUCKET_MAX_PRICE = 0.35;
-        if (topBuckets.some(b => b.price < DUAL_BUCKET_MIN_PRICE || b.price > DUAL_BUCKET_MAX_PRICE)) {
-          const prices = topBuckets.map(b => `$${b.price.toFixed(3)}`).join(", ");
-          skip(`City gate: both markets must be in [$${DUAL_BUCKET_MIN_PRICE}, $${DUAL_BUCKET_MAX_PRICE}] — got [${prices}]`);
-          continue;
-        }
+        // F first ⇒ snapshot bucket1 = F. midpointDistance is display-only now.
+        const topBuckets: ScoredBucket[] = selection.pair.map((b) => ({
+          market: b.market,
+          question: b.question,
+          price: b.price,
+          range: b.range,
+          midpointDistance: Math.abs(bucketMidpoint(b.range) - adjustedForecastTemp),
+        }));
 
         const _fmtRange = (r: [number, number]): string =>
           r[0] === -999 ? `le${r[1]}` : r[1] === 999 ? `ge${r[0]}` : `${r[0]}-${r[1]}`;

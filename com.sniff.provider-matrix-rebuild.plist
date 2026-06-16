@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.sniff.provider-matrix-rebuild</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Library/Frameworks/Python.framework/Versions/3.13/bin/python3</string>
+        <string>provider_backtest.py</string>
+        <string>--days</string>
+        <string>7</string>
+        <string>--lead</string>
+        <string>1</string>
+        <string>--matrix</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/padraighaughey/Polymarket-Weather-Bot</string>
+    <!-- Daily 09:00 local: a 7-day rolling window must be recomputed daily (a
+         weekly rebuild would leave it stale 6/7 days). 09:00 is after the
+         08:15 UTC provider capture and lets IEM CLI actuals for yesterday
+         settle. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>9</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/tmp/provider_matrix_rebuild.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/provider_matrix_rebuild_err.log</string>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/padraighaughey</string>
+        <key>USER</key>
+        <string>padraighaughey</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>
