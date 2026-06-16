@@ -25,20 +25,50 @@ import urllib.request
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 
-# Mirrors src/nws.ts LOCATIONS / STATION_IDS (lat/lon are the airport stations).
+# US cities (°F) — mirrors src/nws.ts LOCATIONS / STATION_IDS (lat/lon are the
+# airport stations). Keyed by the weatherbot-ts slug; actuals from IEM CLI.
+# Each city carries `unit` ("F"|"C") so the bias cap and Open-Meteo fetch unit
+# are chosen per city. Non-US cities (°C) below are keyed by the ECMWF bot's
+# `location_id` and resolve actuals from the `outcomes` DB table (no CLI
+# product); their coords mirror ecmwf_forecast_pipeline.OBSERVATORIES
+# (verified observatory metadata 2026-05-31).
 CITIES = {
-    "nyc":           {"lat": 40.7772, "lon": -73.8726,  "tz": "America/New_York",    "station": "KLGA"},
-    "chicago":       {"lat": 41.9742, "lon": -87.9073,  "tz": "America/Chicago",     "station": "KORD"},
-    "miami":         {"lat": 25.7959, "lon": -80.287,   "tz": "America/New_York",    "station": "KMIA"},
-    "dallas":        {"lat": 32.8471, "lon": -96.8518,  "tz": "America/Chicago",     "station": "KDAL"},
-    "seattle":       {"lat": 47.4502, "lon": -122.3088, "tz": "America/Los_Angeles", "station": "KSEA"},
-    "atlanta":       {"lat": 33.6407, "lon": -84.4277,  "tz": "America/New_York",    "station": "KATL"},
-    "houston":       {"lat": 29.6375, "lon": -95.2825,  "tz": "America/Chicago",     "station": "KHOU"},  # Hobby — PM resolves here, not KIAH
-    "denver":        {"lat": 39.7133, "lon": -104.7581, "tz": "America/Denver",      "station": "KBKF"},  # Buckley SFB — PM resolves here, not KDEN
-    "los-angeles":   {"lat": 34.0536, "lon": -118.2456, "tz": "America/Los_Angeles", "station": "KLAX"},
-    "san-francisco": {"lat": 37.7749, "lon": -122.4194, "tz": "America/Los_Angeles", "station": "KSFO"},
-    "austin":        {"lat": 30.2672, "lon": -97.7431,  "tz": "America/Chicago",     "station": "KAUS"},
+    # ── US (°F, IEM CLI actuals) ──────────────────────────────────────────────
+    "nyc":           {"lat": 40.7772, "lon": -73.8726,  "tz": "America/New_York",    "unit": "F", "station": "KLGA"},
+    "chicago":       {"lat": 41.9742, "lon": -87.9073,  "tz": "America/Chicago",     "unit": "F", "station": "KORD"},
+    "miami":         {"lat": 25.7959, "lon": -80.287,   "tz": "America/New_York",    "unit": "F", "station": "KMIA"},
+    "dallas":        {"lat": 32.8471, "lon": -96.8518,  "tz": "America/Chicago",     "unit": "F", "station": "KDAL"},
+    "seattle":       {"lat": 47.4502, "lon": -122.3088, "tz": "America/Los_Angeles", "unit": "F", "station": "KSEA"},
+    "atlanta":       {"lat": 33.6407, "lon": -84.4277,  "tz": "America/New_York",    "unit": "F", "station": "KATL"},
+    "houston":       {"lat": 29.6375, "lon": -95.2825,  "tz": "America/Chicago",     "unit": "F", "station": "KHOU"},  # Hobby — PM resolves here, not KIAH
+    "denver":        {"lat": 39.7133, "lon": -104.7581, "tz": "America/Denver",      "unit": "F", "station": "KBKF"},  # Buckley SFB — PM resolves here, not KDEN
+    "los-angeles":   {"lat": 34.0536, "lon": -118.2456, "tz": "America/Los_Angeles", "unit": "F", "station": "KLAX"},
+    "san-francisco": {"lat": 37.7749, "lon": -122.4194, "tz": "America/Los_Angeles", "unit": "F", "station": "KSFO"},
+    "austin":        {"lat": 30.2672, "lon": -97.7431,  "tz": "America/Chicago",     "unit": "F", "station": "KAUS"},
+    # ── Non-US (°C, `outcomes` DB actuals) — keyed by ECMWF location_id ────────
+    "shanghai":      {"lat": 31.1678, "lon": 121.4369,  "tz": "Asia/Shanghai",       "unit": "C", "db_actuals": True},
+    "hong_kong":     {"lat": 22.3027, "lon": 114.1772,  "tz": "Asia/Hong_Kong",      "unit": "C", "db_actuals": True},
+    "qingdao":       {"lat": 36.0667, "lon": 120.3333,  "tz": "Asia/Shanghai",       "unit": "C", "db_actuals": True},
+    "beijing":       {"lat": 39.9333, "lon": 116.2833,  "tz": "Asia/Shanghai",       "unit": "C", "db_actuals": True},
+    "london":        {"lat": 51.4700, "lon": -0.4543,   "tz": "Europe/London",       "unit": "C", "db_actuals": True},
+    "paris":         {"lat": 48.8225, "lon": 2.3372,    "tz": "Europe/Paris",        "unit": "C", "db_actuals": True},
+    "taipei":        {"lat": 25.0378, "lon": 121.5644,  "tz": "Asia/Taipei",         "unit": "C", "db_actuals": True},
+    "lucknow":       {"lat": 26.7606, "lon": 80.8893,   "tz": "Asia/Kolkata",        "unit": "C", "db_actuals": True},
+    "toronto":       {"lat": 43.6777, "lon": -79.6248,  "tz": "America/Toronto",     "unit": "C", "db_actuals": True},
+    "buenos_aires":  {"lat": -34.5819, "lon": -58.4804, "tz": "America/Argentina/Buenos_Aires", "unit": "C", "db_actuals": True},
+    "singapore":     {"lat": 1.3502,  "lon": 103.9894,  "tz": "Asia/Singapore",      "unit": "C", "db_actuals": True},
+    "moscow":        {"lat": 55.8300, "lon": 37.6100,   "tz": "Europe/Moscow",       "unit": "C", "db_actuals": True},
+    "tokyo":         {"lat": 35.6900, "lon": 139.7500,  "tz": "Asia/Tokyo",          "unit": "C", "db_actuals": True},
+    "madrid":        {"lat": 40.4080, "lon": -3.6833,   "tz": "Europe/Madrid",       "unit": "C", "db_actuals": True},
+    "shenzhen":      {"lat": 22.5493, "lon": 114.1138,  "tz": "Asia/Shanghai",       "unit": "C", "db_actuals": True},
+    "chongqing":     {"lat": 29.5925, "lon": 106.4691,  "tz": "Asia/Shanghai",       "unit": "C", "db_actuals": True},
 }
+
+# Matrix-key aliases: a single computed cell is written under every key its
+# consumers look up. weatherbot-ts reads by its LOCATIONS slug (e.g. "nyc");
+# the ECMWF bot reads by its location_id (e.g. "new_york"). They agree on
+# dallas/atlanta/austin but diverge on New York, so emit that cell under both.
+MATRIX_ALIASES = {"nyc": "new_york"}
 
 MODELS = [
     "ecmwf_ifs025",         # ECMWF IFS 0.25° (what NYC now uses)
@@ -104,13 +134,52 @@ def fetch_actuals(station, start, end):
     return out
 
 
+# DSN for the bot's postgres (non-US actuals live in `outcomes`). Mirrors the
+# default used by capture_provider_forecasts.py / polymarket_dry_run.py.
+DB_DSN = os.getenv("DATABASE_URL", "postgresql://padraighaughey@localhost:5432/gmgn_trading")
+
+
+def fetch_actuals_db(location_id, start, end):
+    """Resolved high/low per date from the `outcomes` table (Polymarket's settled
+    values, the same source the ECMWF bot resolves on). Used for non-US cities
+    that have no IEM CLI product. Values are already in the city's native unit
+    (°C for non-US). Returns {date_iso: {"high": float|None, "low": float|None}}.
+    """
+    import psycopg2  # local import — only non-US runs need the DB
+    out = {}
+    conn = psycopg2.connect(DB_DSN)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT DATE(date) AS d, actual_max_temp, actual_min_temp
+                FROM outcomes
+                WHERE location_id = %s AND DATE(date) BETWEEN %s AND %s
+                """,
+                (location_id, start.isoformat(), end.isoformat()),
+            )
+            for d, hi, lo in cur.fetchall():
+                out[d.isoformat()] = {
+                    "high": float(hi) if hi is not None else None,
+                    "low": float(lo) if lo is not None else None,
+                }
+    finally:
+        conn.close()
+    return out
+
+
 def fetch_forecasts(city_cfg, start, end, lead, models):
-    """Per-model daily max/min built from previous-run hourly temps at the given lead."""
+    """Per-model daily max/min built from previous-run hourly temps at the given lead.
+
+    Forecast unit follows the city's `unit` so it matches the actuals unit
+    (US °F via IEM CLI; non-US °C via the `outcomes` table) before scoring.
+    """
+    temp_unit = "celsius" if city_cfg.get("unit") == "C" else "fahrenheit"
     var = f"temperature_2m_previous_day{lead}"
     data = http_json(PREV_RUNS_URL, {
         "latitude": city_cfg["lat"], "longitude": city_cfg["lon"],
         "hourly": var, "models": ",".join(models),
-        "temperature_unit": "fahrenheit", "timezone": city_cfg["tz"],
+        "temperature_unit": temp_unit, "timezone": city_cfg["tz"],
         "start_date": start.isoformat(), "end_date": end.isoformat(),
     })
     hourly = data.get("hourly", {})
@@ -127,13 +196,17 @@ def fetch_forecasts(city_cfg, start, end, lead, models):
     return out
 
 
-def bucket(t):
-    """Polymarket 2°F buckets are even-aligned (78-79, 80-81, ...)."""
-    return int(round(t)) // 2
+def bucket(t, unit="F"):
+    """Polymarket bucket index. US °F buckets are 2° wide and even-aligned
+    (78-79, 80-81, ...); non-US °C buckets are 1° wide (single-degree "be 26°C").
+    Used only for the informational bucket_hit metric, not for selection."""
+    width = 1 if unit == "C" else 2
+    return int(round(t)) // width
 
 
-def score(pairs):
-    """pairs: list of (forecast, actual). Returns metric dict."""
+def score(pairs, unit="F"):
+    """pairs: list of (forecast, actual) in the city's native unit. Returns metric dict.
+    `unit` only affects the informational bucket_hit width; MAE/bias are unit-native."""
     if not pairs:
         return None
     errs = [a - f for f, a in pairs]
@@ -150,60 +223,88 @@ def score(pairs):
         "within1": sum(abs(e) <= 1 for e in errs) / n,
         "within3": sum(abs(e) <= 3 for e in errs) / n,
         "within1_db": sum(abs(e) <= 1 for e in derrs) / n,
-        "bucket_hit": sum(bucket(f) == bucket(a) for f, a in pairs) / n,
+        "bucket_hit": sum(bucket(f, unit) == bucket(a, unit) for f, a in pairs) / n,
     }
 
 
 MATRIX_PATH = os.path.join(os.path.dirname(__file__), "provider_matrix.json")
 
 
-def build_matrix(results, incumbent: dict, min_samples: int = 30,
-                 improvement_threshold: float = 0.03) -> dict:
+# A provider whose |bias| exceeds the cap (in the city's native unit) is
+# excluded from selection. On a 7-day window a model whose grid cell doesn't
+# match the resolution station produces absurd bias corrections (e.g. SF icon
+# +9.6°F). Applying a large "correction" to a live forecast is far more
+# dangerous than falling back to the next-best provider (or to defaults when no
+# provider is clean), so over-cap providers are dropped before the MAE pick.
+#   US (°F): 4°F.  Non-US (°C): 2°C (≈3.6°F — the tighter gate, per spec).
+MAX_ABS_BIAS_F = 4.0
+MAX_ABS_BIAS_C = 2.0
+
+
+def max_abs_bias_for(unit: str) -> float:
+    return MAX_ABS_BIAS_C if unit == "C" else MAX_ABS_BIAS_F
+
+
+def build_matrix(results, incumbent: dict, min_samples: int = 5,
+                 city_units: dict | None = None) -> dict:
     """Pick the best provider per (city, mode) from backtest results.
 
-    Promotion gate: only switch from incumbent if the new winner has
-    >= min_samples AND its debiased MAE is > improvement_threshold better
-    than the incumbent provider's MAE. This avoids noisy churn on thin data.
+    7-day rolling selection (no hysteresis): the provider with the lowest
+    debiased MAE that meets the sample gate AND the bias-sanity gate wins
+    outright, every rebuild. Responsiveness is the point — a short window must
+    track regime shifts, so we deliberately do NOT keep an incumbent. The
+    `incumbent` arg is retained only so the report can flag CHANGED cells.
+
+    Gates (a provider must clear BOTH to be eligible):
+      - sample gate: >= min_samples (default 5) forecast/actual pairs.
+      - bias gate: |bias| <= cap, where cap is per the city's native unit
+        (4°F US, 2°C non-US — see max_abs_bias_for). This is a real selection
+        criterion, not just an artifact filter: if the smallest-MAE provider's
+        |bias| exceeds the cap it is skipped and the next-smallest-MAE provider
+        under the cap takes the slot (e.g. Miami max: AIFS MAE 0.85 / bias +4.97
+        dropped for GFS MAE 0.96 / +1.49).
+    A city/mode where NO provider clears both gates writes NO cell — getMae()
+    then returns null in the bot, which means "don't gate, fall back to
+    FORECAST_PROVIDER" (e.g. NWS, which has no archive and only accrues samples
+    from the live capture table over time).
+
+    Each written cell carries `unit` and the applied `max_abs_bias` so consumers
+    can display/verify. Cells are also emitted under MATRIX_ALIASES keys so both
+    the weatherbot-ts slug and the ECMWF location_id resolve the same cell.
     """
+    city_units = city_units or {}
     cities_out = {}
     for city, modes in results.items():
-        cities_out[city] = {}
+        unit = city_units.get(city, "F")
+        cap = max_abs_bias_for(unit)
+        cities_out.setdefault(city, {})
         for mode, model_scores in modes.items():
             if not model_scores:
                 continue
-            # Find the best model meeting the sample gate
+            # Lowest debiased MAE among providers clearing the sample + bias gates.
             ranked = sorted(model_scores.items(), key=lambda kv: kv[1]["mae_debiased"])
             best_model, best_metrics = next(
-                ((m, s) for m, s in ranked if s["n"] >= min_samples), (None, None)
+                ((m, s) for m, s in ranked
+                 if s["n"] >= min_samples and abs(s["bias"]) <= cap),
+                (None, None)
             )
             if best_model is None:
-                continue
-
-            # Check incumbent
-            inc_cell = incumbent.get(city, {}).get(mode, {})
-            inc_provider = inc_cell.get("provider")
-            inc_mae = inc_cell.get("mae_debiased", float("inf"))
-
-            # If incumbent is still one of the scored models, use its current MAE
-            if inc_provider and inc_provider in model_scores:
-                inc_mae = model_scores[inc_provider].get("mae_debiased", inc_mae)
-
-            new_mae = best_metrics["mae_debiased"]
-            if inc_provider and new_mae >= inc_mae * (1 - improvement_threshold):
-                # Not enough improvement — keep incumbent provider but refresh bias
-                provider = inc_provider
-                m = model_scores.get(inc_provider, best_metrics)
-            else:
-                provider = best_model
-                m = best_metrics
+                continue  # no eligible provider — write no cell
 
             cities_out[city][mode] = {
-                "provider": provider,
-                "bias": round(m["bias"], 2),
-                "mae": round(m["mae"], 2),
-                "mae_debiased": round(m["mae_debiased"], 2),
-                "samples": m["n"],
+                "provider": best_model,
+                "bias": round(best_metrics["bias"], 2),
+                "mae": round(best_metrics["mae"], 2),
+                "mae_debiased": round(best_metrics["mae_debiased"], 2),
+                "samples": best_metrics["n"],
+                "unit": unit,
+                "max_abs_bias": cap,
             }
+
+    # Emit each cell under its alias key too, so both consumers resolve it.
+    for canonical, alias in MATRIX_ALIASES.items():
+        if cities_out.get(canonical):
+            cities_out[alias] = cities_out[canonical]
     return cities_out
 
 
@@ -216,7 +317,7 @@ def load_incumbent_matrix() -> dict:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--days", type=int, default=90)
+    ap.add_argument("--days", type=int, default=7)
     ap.add_argument("--lead", type=int, default=1, choices=range(1, 8),
                     help="forecast lead in days (previous_dayN)")
     ap.add_argument("--cities", default=None, help="comma list, default all")
@@ -232,9 +333,15 @@ def main():
     results = {}  # city -> mode -> model -> metrics
     for city in cities:
         cfg = CITIES[city]
-        print(f"[{city}] actuals from {cfg['station']} CLI + {len(MODELS)} models "
+        unit = cfg.get("unit", "F")
+        if cfg.get("db_actuals"):
+            src = f"outcomes DB (°{unit})"
+            actuals = fetch_actuals_db(city, start, end)
+        else:
+            src = f"{cfg['station']} CLI (°{unit})"
+            actuals = fetch_actuals(cfg["station"], start, end)
+        print(f"[{city}] actuals from {src} + {len(MODELS)} models "
               f"@ lead {args.lead}d, {start} → {end} ...", file=sys.stderr)
-        actuals = fetch_actuals(cfg["station"], start, end)
         forecasts = fetch_forecasts(cfg, start, end, args.lead, MODELS)
         results[city] = {}
         for mode, fkey, akey in (("max", "fmax", "high"), ("min", "fmin", "low")):
@@ -245,14 +352,14 @@ def main():
                     fc = forecasts.get(model, {}).get(d)
                     if fc and act[akey] is not None:
                         pairs.append((fc[fkey], act[akey]))
-                m = score(pairs)
+                m = score(pairs, unit)
                 if m:
                     results[city][mode][model] = m
         time.sleep(1)  # be polite to free APIs
 
     meta = {"start": start.isoformat(), "end": end.isoformat(),
             "lead_days": args.lead, "models": MODELS,
-            "actuals_source": "NWS CLI climate reports via IEM (resolution source)"}
+            "actuals_source": "US: NWS CLI via IEM (°F); non-US: outcomes DB table (°C)"}
     with open(args.out, "w") as f:
         json.dump({"meta": meta, "results": results}, f, indent=2)
 
@@ -283,7 +390,8 @@ def main():
 
     if args.matrix:
         incumbent = load_incumbent_matrix()
-        matrix_cities = build_matrix(results, incumbent)
+        city_units = {c: cfg.get("unit", "F") for c, cfg in CITIES.items()}
+        matrix_cities = build_matrix(results, incumbent, city_units=city_units)
         matrix = {
             "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "window_days": args.days,

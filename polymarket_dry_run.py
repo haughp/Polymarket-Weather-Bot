@@ -465,6 +465,18 @@ def record_dry_run(forecast: dict, session) -> None:
 
     raw_temp = float(forecast['forecast_temp'])
     matrix_cell = load_provider_matrix().get(location_id, {}).get(mode)
+    # Guard: a matrix cell is only usable if its unit matches the forecast's
+    # unit. The cell stores "F"/"C"; the forecast stores "fahrenheit"/"celsius".
+    # A mis-keyed cell (e.g. a °C bias landing on a °F forecast) would silently
+    # corrupt bucket selection — so on mismatch we ignore the cell and fall
+    # through to static/0. Cells without a unit (legacy) are treated as matching.
+    if matrix_cell is not None:
+        cell_unit = matrix_cell.get("unit")
+        fc_unit = "C" if forecast['units'] == 'celsius' else "F"
+        if cell_unit is not None and cell_unit != fc_unit:
+            print(f"   ⚠️  matrix cell unit {cell_unit} != forecast unit {fc_unit} "
+                  f"for {location_id}/{mode} — ignoring matrix bias")
+            matrix_cell = None
     if mode in LIVE_BIAS_N.get(location_id, {}):
         # Live outcome-based bias always wins (highest priority)
         bias = LIVE_BIAS.get(location_id, {}).get(mode, 0.0)

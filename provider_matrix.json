@@ -1,182 +1,557 @@
 {
-  "generated_at": "2026-06-12T15:27:58Z",
-  "window_days": 90,
+  "generated_at": "2026-06-16T10:11:23Z",
+  "window_days": 7,
   "lead_days": 1,
   "cities": {
     "nyc": {
       "max": {
-        "provider": "ukmo_seamless",
-        "bias": 0.82,
-        "mae": 2.33,
-        "mae_debiased": 2.15,
-        "samples": 90
+        "provider": "gfs_seamless",
+        "bias": -0.49,
+        "mae": 1.74,
+        "mae_debiased": 1.67,
+        "samples": 7,
+        "unit": "F",
+        "max_abs_bias": 4.0
       },
       "min": {
         "provider": "ecmwf_aifs025_single",
-        "bias": 0.31,
-        "mae": 1.53,
-        "mae_debiased": 1.56,
-        "samples": 90
+        "bias": 2.03,
+        "mae": 2.11,
+        "mae_debiased": 1.65,
+        "samples": 7,
+        "unit": "F",
+        "max_abs_bias": 4.0
       }
     },
     "chicago": {
       "max": {
-        "provider": "gem_seamless",
-        "bias": -0.54,
-        "mae": 2.05,
-        "mae_debiased": 2.07,
-        "samples": 90
+        "provider": "ecmwf_aifs025_single",
+        "bias": 1.36,
+        "mae": 1.61,
+        "mae_debiased": 1.41,
+        "samples": 7,
+        "unit": "F",
+        "max_abs_bias": 4.0
       },
       "min": {
-        "provider": "ncep_nbm_conus",
-        "bias": -2.68,
-        "mae": 3.19,
-        "mae_debiased": 2.32,
-        "samples": 90
+        "provider": "ecmwf_aifs025_single",
+        "bias": -1.69,
+        "mae": 1.86,
+        "mae_debiased": 1.21,
+        "samples": 7,
+        "unit": "F",
+        "max_abs_bias": 4.0
       }
     },
     "miami": {
       "max": {
-        "provider": "ecmwf_aifs025_single",
-        "bias": 4.21,
-        "mae": 4.3,
-        "mae_debiased": 1.42,
-        "samples": 89
+        "provider": "gfs_seamless",
+        "bias": 1.49,
+        "mae": 1.63,
+        "mae_debiased": 0.96,
+        "samples": 7,
+        "unit": "F",
+        "max_abs_bias": 4.0
       },
       "min": {
-        "provider": "ecmwf_ifs025",
-        "bias": 0.04,
-        "mae": 1.24,
-        "mae_debiased": 1.24,
-        "samples": 89
+        "provider": "ncep_nbm_conus",
+        "bias": 0.09,
+        "mae": 0.34,
+        "mae_debiased": 0.31,
+        "samples": 7,
+        "unit": "F",
+        "max_abs_bias": 4.0
       }
     },
     "dallas": {
       "max": {
-        "provider": "ecmwf_aifs025_single",
-        "bias": 1.75,
-        "mae": 2.13,
-        "mae_debiased": 1.67,
-        "samples": 90
+        "provider": "gem_seamless",
+        "bias": -0.71,
+        "mae": 2.17,
+        "mae_debiased": 1.69,
+        "samples": 7,
+        "unit": "F",
+        "max_abs_bias": 4.0
       },
       "min": {
         "provider": "ecmwf_aifs025_single",
-        "bias": 0.47,
-        "mae": 1.88,
-        "mae_debiased": 1.82,
-        "samples": 90
+        "bias": -0.5,
+        "mae": 1.7,
+        "mae_debiased": 1.91,
+        "samples": 7,
+        "unit": "F",
+        "max_abs_bias": 4.0
       }
     },
     "seattle": {
       "max": {
-        "provider": "ecmwf_aifs025_single",
-        "bias": 2.87,
+        "provider": "ncep_nbm_conus",
+        "bias": 3.09,
         "mae": 3.09,
-        "mae_debiased": 1.76,
-        "samples": 90
+        "mae_debiased": 0.55,
+        "samples": 7,
+        "unit": "F",
+        "max_abs_bias": 4.0
       },
       "min": {
-        "provider": "ncep_nbm_conus",
-        "bias": -1.11,
-        "mae": 1.48,
-        "mae_debiased": 1.1,
-        "samples": 90
+        "provider": "ecmwf_ifs025",
+        "bias": 1.6,
+        "mae": 1.6,
+        "mae_debiased": 0.66,
+        "samples": 7,
+        "unit": "F",
+        "max_abs_bias": 4.0
       }
     },
     "atlanta": {
       "max": {
-        "provider": "ecmwf_aifs025_single",
-        "bias": 3.56,
-        "mae": 3.72,
-        "mae_debiased": 1.66,
-        "samples": 90
+        "provider": "ncep_nbm_conus",
+        "bias": 1.89,
+        "mae": 1.89,
+        "mae_debiased": 0.9,
+        "samples": 7,
+        "unit": "F",
+        "max_abs_bias": 4.0
       },
       "min": {
-        "provider": "ncep_nbm_conus",
-        "bias": 0.17,
-        "mae": 1.35,
-        "mae_debiased": 1.33,
-        "samples": 89
+        "provider": "gfs_seamless",
+        "bias": 2.11,
+        "mae": 2.11,
+        "mae_debiased": 0.9,
+        "samples": 7,
+        "unit": "F",
+        "max_abs_bias": 4.0
       }
     },
     "houston": {
       "max": {
-        "provider": "ncep_nbm_conus",
-        "bias": 1.12,
-        "mae": 1.58,
-        "mae_debiased": 1.38,
-        "samples": 90
+        "provider": "ukmo_seamless",
+        "bias": -0.16,
+        "mae": 0.84,
+        "mae_debiased": 0.82,
+        "samples": 7,
+        "unit": "F",
+        "max_abs_bias": 4.0
       },
       "min": {
-        "provider": "gfs_seamless",
-        "bias": 1.33,
-        "mae": 2.09,
-        "mae_debiased": 1.61,
-        "samples": 90
+        "provider": "ecmwf_ifs025",
+        "bias": 1.09,
+        "mae": 1.09,
+        "mae_debiased": 0.62,
+        "samples": 7,
+        "unit": "F",
+        "max_abs_bias": 4.0
       }
     },
     "denver": {
       "max": {
-        "provider": "ecmwf_aifs025_single",
-        "bias": 2.76,
-        "mae": 3.44,
-        "mae_debiased": 2.66,
-        "samples": 90
+        "provider": "ecmwf_ifs025",
+        "bias": 1.57,
+        "mae": 2.03,
+        "mae_debiased": 0.91,
+        "samples": 7,
+        "unit": "F",
+        "max_abs_bias": 4.0
       },
       "min": {
-        "provider": "ecmwf_aifs025_single",
-        "bias": 0.26,
-        "mae": 2.14,
-        "mae_debiased": 2.12,
-        "samples": 90
+        "provider": "gfs_seamless",
+        "bias": -1.43,
+        "mae": 2.34,
+        "mae_debiased": 1.78,
+        "samples": 7,
+        "unit": "F",
+        "max_abs_bias": 4.0
       }
     },
     "los-angeles": {
-      "max": {
-        "provider": "icon_seamless",
-        "bias": -1.8,
-        "mae": 2.68,
-        "mae_debiased": 2.33,
-        "samples": 90
-      },
       "min": {
-        "provider": "ecmwf_aifs025_single",
-        "bias": 1.67,
-        "mae": 1.82,
-        "mae_debiased": 1.06,
-        "samples": 90
+        "provider": "ukmo_seamless",
+        "bias": -0.64,
+        "mae": 0.96,
+        "mae_debiased": 1.05,
+        "samples": 7,
+        "unit": "F",
+        "max_abs_bias": 4.0
       }
     },
     "san-francisco": {
       "max": {
-        "provider": "ecmwf_ifs025",
-        "bias": 3.25,
-        "mae": 3.34,
-        "mae_debiased": 1.8,
-        "samples": 90
+        "provider": "ecmwf_aifs025_single",
+        "bias": 2.97,
+        "mae": 2.97,
+        "mae_debiased": 3.22,
+        "samples": 7,
+        "unit": "F",
+        "max_abs_bias": 4.0
       },
       "min": {
-        "provider": "ncep_nbm_conus",
-        "bias": -0.96,
-        "mae": 1.47,
-        "mae_debiased": 1.29,
-        "samples": 90
+        "provider": "icon_seamless",
+        "bias": 1.24,
+        "mae": 1.24,
+        "mae_debiased": 0.73,
+        "samples": 7,
+        "unit": "F",
+        "max_abs_bias": 4.0
       }
     },
     "austin": {
       "max": {
+        "provider": "gfs_seamless",
+        "bias": 1.64,
+        "mae": 1.73,
+        "mae_debiased": 1.04,
+        "samples": 7,
+        "unit": "F",
+        "max_abs_bias": 4.0
+      },
+      "min": {
+        "provider": "gem_seamless",
+        "bias": -0.87,
+        "mae": 1.5,
+        "mae_debiased": 1.38,
+        "samples": 7,
+        "unit": "F",
+        "max_abs_bias": 4.0
+      }
+    },
+    "shanghai": {
+      "max": {
+        "provider": "ukmo_seamless",
+        "bias": -0.24,
+        "mae": 1.01,
+        "mae_debiased": 0.98,
+        "samples": 7,
+        "unit": "C",
+        "max_abs_bias": 2.0
+      },
+      "min": {
+        "provider": "ukmo_seamless",
+        "bias": -0.41,
+        "mae": 0.73,
+        "mae_debiased": 0.56,
+        "samples": 7,
+        "unit": "C",
+        "max_abs_bias": 2.0
+      }
+    },
+    "hong_kong": {
+      "max": {
+        "provider": "ecmwf_aifs025_single",
+        "bias": -0.34,
+        "mae": 0.6,
+        "mae_debiased": 0.48,
+        "samples": 7,
+        "unit": "C",
+        "max_abs_bias": 2.0
+      },
+      "min": {
         "provider": "icon_seamless",
-        "bias": 1.82,
-        "mae": 2.71,
-        "mae_debiased": 1.89,
-        "samples": 90
+        "bias": -1.94,
+        "mae": 1.94,
+        "mae_debiased": 0.47,
+        "samples": 7,
+        "unit": "C",
+        "max_abs_bias": 2.0
+      }
+    },
+    "qingdao": {
+      "max": {
+        "provider": "ecmwf_ifs025",
+        "bias": -0.09,
+        "mae": 0.71,
+        "mae_debiased": 0.7,
+        "samples": 7,
+        "unit": "C",
+        "max_abs_bias": 2.0
+      },
+      "min": {
+        "provider": "gem_seamless",
+        "bias": -0.74,
+        "mae": 1.34,
+        "mae_debiased": 0.88,
+        "samples": 7,
+        "unit": "C",
+        "max_abs_bias": 2.0
+      }
+    },
+    "beijing": {
+      "max": {
+        "provider": "ecmwf_aifs025_single",
+        "bias": 0.59,
+        "mae": 0.81,
+        "mae_debiased": 0.73,
+        "samples": 7,
+        "unit": "C",
+        "max_abs_bias": 2.0
+      },
+      "min": {
+        "provider": "gem_seamless",
+        "bias": -0.17,
+        "mae": 1.0,
+        "mae_debiased": 1.02,
+        "samples": 7,
+        "unit": "C",
+        "max_abs_bias": 2.0
+      }
+    },
+    "london": {
+      "max": {
+        "provider": "ecmwf_aifs025_single",
+        "bias": 1.39,
+        "mae": 1.41,
+        "mae_debiased": 0.78,
+        "samples": 7,
+        "unit": "C",
+        "max_abs_bias": 2.0
+      },
+      "min": {
+        "provider": "ecmwf_ifs025",
+        "bias": 0.83,
+        "mae": 0.83,
+        "mae_debiased": 0.35,
+        "samples": 7,
+        "unit": "C",
+        "max_abs_bias": 2.0
+      }
+    },
+    "paris": {
+      "max": {
+        "provider": "gem_seamless",
+        "bias": -1.09,
+        "mae": 1.09,
+        "mae_debiased": 0.58,
+        "samples": 7,
+        "unit": "C",
+        "max_abs_bias": 2.0
+      },
+      "min": {
+        "provider": "icon_seamless",
+        "bias": -0.31,
+        "mae": 0.71,
+        "mae_debiased": 0.58,
+        "samples": 7,
+        "unit": "C",
+        "max_abs_bias": 2.0
+      }
+    },
+    "taipei": {
+      "max": {
+        "provider": "ukmo_seamless",
+        "bias": 0.26,
+        "mae": 0.97,
+        "mae_debiased": 1.01,
+        "samples": 7,
+        "unit": "C",
+        "max_abs_bias": 2.0
+      },
+      "min": {
+        "provider": "gfs_seamless",
+        "bias": 0.37,
+        "mae": 0.77,
+        "mae_debiased": 0.74,
+        "samples": 7,
+        "unit": "C",
+        "max_abs_bias": 2.0
+      }
+    },
+    "lucknow": {
+      "max": {
+        "provider": "ecmwf_ifs025",
+        "bias": 0.1,
+        "mae": 0.81,
+        "mae_debiased": 0.8,
+        "samples": 7,
+        "unit": "C",
+        "max_abs_bias": 2.0
+      },
+      "min": {
+        "provider": "ecmwf_ifs025",
+        "bias": 1.06,
+        "mae": 1.11,
+        "mae_debiased": 0.98,
+        "samples": 7,
+        "unit": "C",
+        "max_abs_bias": 2.0
+      }
+    },
+    "toronto": {
+      "max": {
+        "provider": "ecmwf_aifs025_single",
+        "bias": -0.27,
+        "mae": 0.47,
+        "mae_debiased": 0.45,
+        "samples": 7,
+        "unit": "C",
+        "max_abs_bias": 2.0
+      },
+      "min": {
+        "provider": "icon_seamless",
+        "bias": -0.03,
+        "mae": 0.63,
+        "mae_debiased": 0.63,
+        "samples": 7,
+        "unit": "C",
+        "max_abs_bias": 2.0
+      }
+    },
+    "buenos_aires": {
+      "max": {
+        "provider": "gem_seamless",
+        "bias": 1.97,
+        "mae": 1.97,
+        "mae_debiased": 0.48,
+        "samples": 7,
+        "unit": "C",
+        "max_abs_bias": 2.0
+      },
+      "min": {
+        "provider": "gem_seamless",
+        "bias": -0.16,
+        "mae": 1.47,
+        "mae_debiased": 1.45,
+        "samples": 7,
+        "unit": "C",
+        "max_abs_bias": 2.0
+      }
+    },
+    "singapore": {
+      "max": {
+        "provider": "ecmwf_aifs025_single",
+        "bias": 0.36,
+        "mae": 0.64,
+        "mae_debiased": 0.49,
+        "samples": 7,
+        "unit": "C",
+        "max_abs_bias": 2.0
+      },
+      "min": {
+        "provider": "gfs_seamless",
+        "bias": -1.66,
+        "mae": 1.66,
+        "mae_debiased": 0.75,
+        "samples": 7,
+        "unit": "C",
+        "max_abs_bias": 2.0
+      }
+    },
+    "moscow": {
+      "max": {
+        "provider": "gem_seamless",
+        "bias": 0.16,
+        "mae": 0.39,
+        "mae_debiased": 0.38,
+        "samples": 7,
+        "unit": "C",
+        "max_abs_bias": 2.0
+      },
+      "min": {
+        "provider": "gem_seamless",
+        "bias": -0.67,
+        "mae": 0.73,
+        "mae_debiased": 0.65,
+        "samples": 7,
+        "unit": "C",
+        "max_abs_bias": 2.0
+      }
+    },
+    "tokyo": {
+      "max": {
+        "provider": "gfs_seamless",
+        "bias": 1.43,
+        "mae": 1.43,
+        "mae_debiased": 0.49,
+        "samples": 7,
+        "unit": "C",
+        "max_abs_bias": 2.0
+      },
+      "min": {
+        "provider": "icon_seamless",
+        "bias": 0.3,
+        "mae": 0.61,
+        "mae_debiased": 0.57,
+        "samples": 7,
+        "unit": "C",
+        "max_abs_bias": 2.0
+      }
+    },
+    "madrid": {
+      "max": {
+        "provider": "gem_seamless",
+        "bias": 0.96,
+        "mae": 0.96,
+        "mae_debiased": 0.32,
+        "samples": 7,
+        "unit": "C",
+        "max_abs_bias": 2.0
       },
       "min": {
         "provider": "ecmwf_aifs025_single",
-        "bias": -2.06,
-        "mae": 2.64,
-        "mae_debiased": 2.46,
-        "samples": 90
+        "bias": -1.66,
+        "mae": 1.66,
+        "mae_debiased": 0.53,
+        "samples": 7,
+        "unit": "C",
+        "max_abs_bias": 2.0
+      }
+    },
+    "shenzhen": {
+      "max": {
+        "provider": "ecmwf_aifs025_single",
+        "bias": 0.19,
+        "mae": 0.9,
+        "mae_debiased": 0.9,
+        "samples": 7,
+        "unit": "C",
+        "max_abs_bias": 2.0
+      },
+      "min": {
+        "provider": "ecmwf_ifs025",
+        "bias": -1.14,
+        "mae": 1.14,
+        "mae_debiased": 0.45,
+        "samples": 7,
+        "unit": "C",
+        "max_abs_bias": 2.0
+      }
+    },
+    "chongqing": {
+      "max": {
+        "provider": "ecmwf_aifs025_single",
+        "bias": -0.06,
+        "mae": 1.14,
+        "mae_debiased": 1.15,
+        "samples": 7,
+        "unit": "C",
+        "max_abs_bias": 2.0
+      },
+      "min": {
+        "provider": "ecmwf_aifs025_single",
+        "bias": -1.27,
+        "mae": 1.27,
+        "mae_debiased": 0.7,
+        "samples": 7,
+        "unit": "C",
+        "max_abs_bias": 2.0
+      }
+    },
+    "new_york": {
+      "max": {
+        "provider": "gfs_seamless",
+        "bias": -0.49,
+        "mae": 1.74,
+        "mae_debiased": 1.67,
+        "samples": 7,
+        "unit": "F",
+        "max_abs_bias": 4.0
+      },
+      "min": {
+        "provider": "ecmwf_aifs025_single",
+        "bias": 2.03,
+        "mae": 2.11,
+        "mae_debiased": 1.65,
+        "samples": 7,
+        "unit": "F",
+        "max_abs_bias": 4.0
       }
     }
   }
