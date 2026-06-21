@@ -230,16 +230,6 @@ def score(pairs, unit="F"):
 MATRIX_PATH = os.path.join(os.path.dirname(__file__), "provider_matrix.json")
 
 
-# A provider whose |bias| exceeds the cap (in the city's native unit) is
-# excluded from selection. On a 7-day window a model whose grid cell doesn't
-# match the resolution station produces absurd bias corrections (e.g. SF icon
-# +9.6°F). Applying a large "correction" to a live forecast is far more
-# dangerous than falling back to the next-best provider (or to defaults when no
-# provider is clean), so over-cap providers are dropped before the MAE pick.
-#   US (°F): 4°F.  Non-US (°C): 2°C (≈3.6°F — the tighter gate, per spec).
-MAX_ABS_BIAS_F = 4.0
-MAX_ABS_BIAS_C = 2.0
-
 # Debiased-MAE cap (in the city's native unit) a provider must clear to be selected.
 # A provider whose typical error after debiasing exceeds ~one bucket cannot reliably
 # land in the right bucket, so it is dropped and the next-smallest-MAE eligible provider
@@ -247,12 +237,13 @@ MAX_ABS_BIAS_C = 2.0
 # then skips the city). Added 2026-06-16 after NYC + Dallas June-15 losses where the
 # matrix-chosen provider's mae_debiased of 1.6–1.9°F still traded and missed by a bucket.
 #   US (°F): 1.5°F.  Non-US (°C): 1.0°C.
+# A separate |bias| <= 4°F/2°C cap previously ran alongside this one. Dropped 2026-06-19:
+# debiasing already subtracts the bias before this cap is checked, so a high-bias/low-MAE
+# provider (e.g. Miami AIFS: MAE 0.85, bias +4.97) is already corrected to a trustworthy
+# debiased error — penalizing it twice for the same number was redundant gating, not an
+# independent risk check.
 MAX_MAE_F = 1.5
 MAX_MAE_C = 1.0
-
-
-def max_abs_bias_for(unit: str) -> float:
-    return MAX_ABS_BIAS_C if unit == "C" else MAX_ABS_BIAS_F
 
 
 def max_mae_for(unit: str) -> float:
@@ -264,52 +255,42 @@ def build_matrix(results, incumbent: dict, min_samples: int = 5,
     """Pick the best provider per (city, mode) from backtest results.
 
     7-day rolling selection (no hysteresis): the provider with the lowest
-    debiased MAE that meets the sample gate AND the bias-sanity gate wins
-    outright, every rebuild. Responsiveness is the point — a short window must
-    track regime shifts, so we deliberately do NOT keep an incumbent. The
-    `incumbent` arg is retained only so the report can flag CHANGED cells.
+    debiased MAE that meets the sample gate wins outright, every rebuild.
+    Responsiveness is the point — a short window must track regime shifts, so
+    we deliberately do NOT keep an incumbent. The `incumbent` arg is retained
+    only so the report can flag CHANGED cells.
 
-    Gates (a provider must clear ALL THREE to be eligible):
+    Gates (a provider must clear BOTH to be eligible):
       - sample gate: >= min_samples (default 5) forecast/actual pairs.
-      - bias gate: |bias| <= cap, where cap is per the city's native unit
-        (4°F US, 2°C non-US — see max_abs_bias_for). This is a real selection
-        criterion, not just an artifact filter: if the smallest-MAE provider's
-        |bias| exceeds the cap it is skipped and the next-smallest-MAE provider
-        under the cap takes the slot (e.g. Miami max: AIFS MAE 0.85 / bias +4.97
-        dropped for GFS MAE 0.96 / +1.49).
       - MAE gate: mae_debiased <= mae_cap (1.5°F US, 1.0°C non-US — see
-        max_mae_for). Same substitution logic: the lowest-MAE provider that also
-        clears this cap wins; if even the best provider exceeds it, no provider is
-        eligible and no cell is written (the runtime gate then skips that city).
-    A city/mode where NO provider clears both gates writes NO cell — getMae()
+        max_mae_for). The lowest-MAE provider that clears this cap wins; if
+        even the best provider exceeds it, no provider is eligible and no cell
+        is written (the runtime gate then skips that city).
+    A city/mode where no provider clears both gates writes NO cell — getMae()
     then returns null in the bot, which means "don't gate, fall back to
     FORECAST_PROVIDER" (e.g. NWS, which has no archive and only accrues samples
     from the live capture table over time).
 
-    Each written cell carries `unit` and the applied `max_abs_bias` so consumers
-    can display/verify. Cells are also emitted under MATRIX_ALIASES keys so both
-    the weatherbot-ts slug and the ECMWF location_id resolve the same cell.
+    Cells are also emitted under MATRIX_ALIASES keys so both the weatherbot-ts
+    slug and the ECMWF location_id resolve the same cell.
     """
     city_units = city_units or {}
     cities_out = {}
     for city, modes in results.items():
         unit = city_units.get(city, "F")
-        cap = max_abs_bias_for(unit)
         mae_cap = max_mae_for(unit)
         cities_out.setdefault(city, {})
         for mode, model_scores in modes.items():
             if not model_scores:
                 continue
-            # Lowest debiased MAE among providers clearing the sample + bias + MAE gates.
-            # The MAE gate is a selection criterion, not just a runtime backstop: if the
-            # smallest-MAE provider still exceeds mae_cap it is skipped and the next-best
-            # ELIGIBLE provider takes the slot. Only when no provider clears all three
-            # gates is no cell written (the runtime gate then skips the city).
+            # Lowest debiased MAE among providers clearing the sample + MAE gates.
+            # If the smallest-MAE provider still exceeds mae_cap it is skipped and
+            # the next-best ELIGIBLE provider takes the slot. Only when no provider
+            # clears both gates is no cell written (the runtime gate then skips the city).
             ranked = sorted(model_scores.items(), key=lambda kv: kv[1]["mae_debiased"])
             best_model, best_metrics = next(
                 ((m, s) for m, s in ranked
                  if s["n"] >= min_samples
-                 and abs(s["bias"]) <= cap
                  and s["mae_debiased"] <= mae_cap),
                 (None, None)
             )
@@ -323,7 +304,6 @@ def build_matrix(results, incumbent: dict, min_samples: int = 5,
                 "mae_debiased": round(best_metrics["mae_debiased"], 2),
                 "samples": best_metrics["n"],
                 "unit": unit,
-                "max_abs_bias": cap,
             }
 
     # Emit each cell under its alias key too, so both consumers resolve it.

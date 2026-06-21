@@ -1,0 +1,18 @@
+{
+  "hong_kong:max": {
+    "status": "shadow",
+    "note": "Staged rollout 2026-06-18: held back until paris:min's first live FOK order is manually verified against the Polymarket UI. Also carries ERA5-sourced outcomes (IEM-excluded) per daily_review_ecmwf.md known issues — accepted risk, not a bug, once promoted."
+  },
+  "shenzhen:max": {
+    "status": "shadow",
+    "note": "Staged rollout 2026-06-18: held back until paris:min's first live FOK order is manually verified against the Polymarket UI. Also carries anomalous low band-agreement on both IEM/ERA5 outcome sources per daily_review_ecmwf.md known issues — accepted risk, not a bug, once promoted."
+  },
+  "paris:min": {
+    "status": "live",
+    "note": "First combo in staged rollout 2026-06-18 — verify the first real FOK order against the Polymarket UI before promoting hong_kong/shenzhen/lucknow."
+  },
+  "lucknow:max": {
+    "status": "shadow",
+    "note": "Staged rollout 2026-06-18: held back until paris:min's first live FOK order is manually verified against the Polymarket UI."
+  }
+}

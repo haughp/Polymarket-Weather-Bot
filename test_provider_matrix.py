@@ -1,5 +1,5 @@
-"""Unit tests for the (temperature) provider matrix builder: per-unit bias cap,
-smallest-MAE selection, the nyc↔new_york alias, and °C scoring. Pure-function —
+"""Unit tests for the (temperature) provider matrix builder: per-unit debiased-MAE
+cap, smallest-MAE selection, the nyc↔new_york alias, and °C scoring. Pure-function —
 no DB or network.
 
     python3 -m pytest test_provider_matrix.py -v
@@ -8,10 +8,7 @@ no DB or network.
 from provider_backtest import (
     build_matrix,
     score,
-    max_abs_bias_for,
     max_mae_for,
-    MAX_ABS_BIAS_F,
-    MAX_ABS_BIAS_C,
     MAX_MAE_F,
     MAX_MAE_C,
     MATRIX_ALIASES,
@@ -25,12 +22,6 @@ def _m(mae_debiased, bias, n=7):
 
 
 # ── per-unit cap constant ──────────────────────────────────────────────────────
-def test_cap_is_unit_aware():
-    assert max_abs_bias_for("F") == MAX_ABS_BIAS_F == 4.0
-    assert max_abs_bias_for("C") == MAX_ABS_BIAS_C == 2.0
-    assert max_abs_bias_for("anything-else") == MAX_ABS_BIAS_F  # default F
-
-
 def test_mae_cap_is_unit_aware():
     assert max_mae_for("F") == MAX_MAE_F == 1.5
     assert max_mae_for("C") == MAX_MAE_C == 1.0
@@ -72,18 +63,18 @@ def test_nonus_mae_cap_is_tighter():
     assert out["london"]["max"]["provider"] == "gfs_seamless"
 
 
-# ── US (°F) selection: smallest MAE wins among providers under the 4°F cap ─────
-def test_us_smallest_mae_under_cap_wins():
+# ── US (°F) selection: smallest debiased MAE wins outright, bias is informational ──
+def test_us_smallest_mae_wins_regardless_of_bias():
     results = {"miami": {"max": {
-        "ecmwf_aifs025_single": _m(0.85, +4.97),  # best MAE but bias > 4°F → skipped
-        "gfs_seamless":         _m(0.96, +1.49),  # next-best, under cap → wins
+        "ecmwf_aifs025_single": _m(0.85, +4.97),  # best MAE, large bias → still wins
+        "gfs_seamless":         _m(0.96, +1.49),
         "icon_seamless":        _m(1.20, -0.30),
     }}}
     out = build_matrix(results, incumbent={}, city_units={"miami": "F"})
     cell = out["miami"]["max"]
-    assert cell["provider"] == "gfs_seamless"
+    assert cell["provider"] == "ecmwf_aifs025_single"
     assert cell["unit"] == "F"
-    assert cell["max_abs_bias"] == 4.0
+    assert cell["bias"] == 4.97
 
 
 def test_us_uncapped_provider_wins_when_clean():
@@ -95,23 +86,23 @@ def test_us_uncapped_provider_wins_when_clean():
     assert out["chicago"]["max"]["provider"] == "ecmwf_aifs025_single"
 
 
-# ── Non-US (°C) selection: 2°C cap is the tighter gate ─────────────────────────
-def test_nonus_2c_cap_skips_provider_over_2c():
+# ── Non-US (°C) selection: smallest debiased MAE wins, 1.0°C cap still applies ──
+def test_nonus_smallest_mae_wins_regardless_of_bias():
     results = {"london": {"max": {
-        "ecmwf_ifs025":  _m(0.50, +2.5),  # best MAE but bias > 2°C → skipped
-        "gfs_seamless":  _m(0.80, +1.5),  # under 2°C cap → wins
+        "ecmwf_ifs025":  _m(0.50, +2.5),  # best MAE, large bias → still wins
+        "gfs_seamless":  _m(0.80, +1.5),
     }}}
     out = build_matrix(results, incumbent={}, city_units={"london": "C"})
     cell = out["london"]["max"]
-    assert cell["provider"] == "gfs_seamless"
+    assert cell["provider"] == "ecmwf_ifs025"
     assert cell["unit"] == "C"
-    assert cell["max_abs_bias"] == 2.0
+    assert cell["bias"] == 2.5
 
 
-def test_nonus_no_clean_provider_writes_no_cell():
+def test_nonus_no_provider_under_mae_cap_writes_no_cell():
     results = {"madrid": {"max": {
-        "ecmwf_ifs025": _m(0.50, +3.0),  # both over the 2°C cap
-        "gfs_seamless": _m(0.60, -2.4),
+        "ecmwf_ifs025": _m(1.50, +3.0),  # both over the 1.0°C MAE cap
+        "gfs_seamless": _m(1.60, -2.4),
     }}}
     out = build_matrix(results, incumbent={}, city_units={"madrid": "C"})
     assert out.get("madrid", {}).get("max") is None  # no eligible provider

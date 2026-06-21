@@ -193,6 +193,25 @@ class WeatherExecutor:
             return self._simulate_buy(token_id, price, size)
         return self._live_buy(token_id, price, size)
 
+    def buy_yes_fok(
+        self,
+        token_id: str,
+        price: float,
+        size_usdc: Optional[float] = None,
+    ) -> OrderResult:
+        """
+        Place a FOK (Fill-or-Kill) limit BUY YES order at `price`.
+
+        Fills completely or cancels immediately — no resting order, matching
+        weatherbot-ts's buyYesFok (clob.ts). Use for thin weather markets where
+        a GTC order would sit unmatched. size_usdc: override session default.
+        In dry_run mode, simulates instant fill and returns success=True.
+        """
+        size = size_usdc if size_usdc is not None else self._size
+        if self._dry_run:
+            return self._simulate_buy(token_id, price, size)
+        return self._live_buy_fok(token_id, price, size)
+
     # ── Internal helpers ───────────────────────────────────────────
 
     def _simulate_buy(self, token_id: str, price: float, size: float) -> OrderResult:
@@ -320,6 +339,134 @@ class WeatherExecutor:
                     continue
                 else:
                     log.error("BUY failed  class=%s: %s", error_class, clean_err)
+                    last_error = clean_err
+                    break
+
+        return OrderResult(
+            success=False,
+            order_id=None,
+            token_id=token_id,
+            side="BUY_YES",
+            size_usdc=size,
+            shares=0.0,
+            price_filled=price,
+            fee_paid=0.0,
+            dry_run=False,
+            error=last_error,
+        )
+
+    def _live_buy_fok(self, token_id: str, price: float, size: float) -> OrderResult:
+        """Live FOK BUY order via py-clob-client-v2. Retries only on transient
+        connection errors before order submission; a CANCELLED/not-filled FOK
+        response is terminal (no retry — the order either filled or it didn't)."""
+        from py_clob_client_v2.clob_types import (
+            OrderArgs,
+            OrderType,
+            BalanceAllowanceParams,
+            AssetType,
+        )
+
+        t_sent = time.time()
+        MAX_RETRIES = 1
+        RETRY_SLEEP = 1.5
+        attempt = 0
+        last_error = ""
+
+        while attempt <= MAX_RETRIES:
+            attempt += 1
+            try:
+                if self._client is None:
+                    self._init_client()
+
+                if attempt == 1:
+                    try:
+                        self._client.update_balance_allowance(
+                            BalanceAllowanceParams(
+                                asset_type=AssetType.COLLATERAL,
+                                signature_type=0,
+                            )
+                        )
+                        log.debug("Collateral sync OK  token=...%s", token_id[-8:])
+                    except Exception as sync_exc:
+                        log.warning("Collateral sync failed (proceeding): %s", sync_exc)
+
+                shares = math.ceil(size / price * 100) / 100 if price > 0 else 0.0
+                args = OrderArgs(
+                    token_id=token_id,
+                    price=round(price, 4),
+                    size=shares,
+                    side="BUY",
+                )
+                signed_order = self._client.create_order(args)
+                resp = self._client.post_order(signed_order, OrderType.FOK)
+                t_fill = time.time()
+
+                order_id = resp.get("orderID") or resp.get("id", "unknown")
+                status = str(resp.get("status", "")).upper()
+                latency_ms = (t_fill - t_sent) * 1000
+                filled = status in ("MATCHED", "FILLED", "MTC")
+
+                if not filled:
+                    log.warning(
+                        "FOK not filled [%s]  token=...%s  status=%s  latency=%.0fms",
+                        str(order_id)[:12], token_id[-8:], status, latency_ms,
+                    )
+                    return OrderResult(
+                        success=False,
+                        order_id=str(order_id),
+                        token_id=token_id,
+                        side="BUY_YES",
+                        size_usdc=size,
+                        shares=0.0,
+                        price_filled=price,
+                        fee_paid=0.0,
+                        dry_run=False,
+                        error=f"fok_order_not_filled: status={status}",
+                    )
+
+                price_filled = float(resp.get("price", price))
+                fee_paid = size * TAKER_FEE_RATE
+
+                log.info(
+                    "FOK BUY ORDER [%s]  token=...%s @ %.4f  shares=%.4f  "
+                    "fee=%.4f  latency=%.0fms  status=%s",
+                    str(order_id)[:12], token_id[-8:], price_filled,
+                    shares, fee_paid, latency_ms, status,
+                )
+
+                return OrderResult(
+                    success=True,
+                    order_id=str(order_id),
+                    token_id=token_id,
+                    side="BUY_YES",
+                    size_usdc=size,
+                    shares=shares,
+                    price_filled=price_filled,
+                    fee_paid=fee_paid,
+                    dry_run=False,
+                )
+
+            except Exception as e:
+                err_str = str(e).lower()
+                error_class = self._classify_error(err_str)
+
+                if type(e).__name__ == "PolyApiException":
+                    sc = getattr(e, "status_code", "API_ERR")
+                    msg = getattr(e, "error_message", str(e))
+                    clean_err = f"PolyApiException[{sc}]: {msg}"
+                else:
+                    clean_err = str(e)
+
+                if error_class == "retry" and attempt <= MAX_RETRIES:
+                    log.warning(
+                        "FOK BUY transient error (retry in %.1fs): %s",
+                        RETRY_SLEEP, clean_err,
+                    )
+                    last_error = clean_err
+                    time.sleep(RETRY_SLEEP)
+                    continue
+                else:
+                    log.error("FOK BUY failed  class=%s: %s", error_class, clean_err)
                     last_error = clean_err
                     break
 

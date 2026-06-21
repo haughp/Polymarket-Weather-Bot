@@ -13,6 +13,7 @@ import datetime
 import httpx
 from zoneinfo import ZoneInfo
 from database_schema import init_database, Forecast, MarketState, MarketBucket, TradeSimulation
+from execution.weather_executor import WeatherExecutor
 
 GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API = "https://clob.polymarket.com"
@@ -88,6 +89,92 @@ LOCATION_TIMEZONES = {
 
 SIM_SIZE_USD = 5.0
 
+# Per-(location, mode) live/shadow gate, mirroring weatherbot-ts's city_status.json
+# (cityStatus.ts). Fail-safe: a missing file or missing key means shadow — an
+# unlisted combo must never place a real order.
+_LIVE_STATUS_PATH = os.path.join(os.path.dirname(__file__), "ecmwf_live_status.json")
+
+
+def _load_live_status() -> dict:
+    """Load ecmwf_live_status.json. Returns {} if absent or unreadable."""
+    if os.path.exists(_LIVE_STATUS_PATH):
+        with open(_LIVE_STATUS_PATH) as f:
+            return json.load(f)
+    return {}
+
+
+def _is_live(location_id: str, mode: str, status: dict) -> bool:
+    """Decide whether a (location_id, mode) combo may trade with real money."""
+    entry = status.get(f"{location_id}:{mode}")
+    if not entry:
+        return False
+    return entry.get("status") == "live"
+
+
+# Mirrors weatherbot-ts strategy.ts's already-held guard (lines 606-617): don't add
+# a 3rd leg for the same city/date if forecast drift already produced 2 legs.
+MAX_LEGS_PER_CITY_DATE = 2
+
+# Global cap across all live (location, mode) combos — mirrors config.max_open_positions
+# in weatherbot-ts. Limits aggregate exposure regardless of how many combos are live.
+MAX_OPEN_LIVE_POSITIONS = 8
+
+
+def _count_open_legs(session, location_id: str, mode: str, market_date) -> int:
+    """Count real (non-dry-run) held legs for this (location_id, mode, market_date).
+
+    TradeSimulation rows are shared by every city/mode and by shadow combos too —
+    must filter on mode and dry_run=False, or shadow rows (and other modes for the
+    same city/date) saturate the cap and permanently block a live combo that has
+    never actually held a position.
+    """
+    return (
+        session.query(TradeSimulation)
+        .filter_by(location_id=location_id, mode=mode, market_date=market_date, dry_run=False)
+        .count()
+    )
+
+
+def _count_open_live_positions(session) -> int:
+    """Count real (non-dry-run) held legs across every city/mode/date (global exposure cap)."""
+    return session.query(TradeSimulation).filter_by(dry_run=False).count()
+
+
+# Real-money safety: even with combos flagged "live" in ecmwf_live_status.json,
+# WeatherExecutor stays in dry-run mode unless ECMWF_LIVE_TRADING=1 is explicitly
+# set in the environment. This lets the live code path (gates, DB writes, logging)
+# be exercised end-to-end with zero real-order risk before flipping the env var —
+# the forced-dry-run verification step called for before any combo goes live.
+_executor = WeatherExecutor(
+    trade_size_usdc=SIM_SIZE_USD,
+    dry_run=os.environ.get("ECMWF_LIVE_TRADING") != "1",
+)
+
+
+def _execute_leg(session, executor, location_id: str, mode: str, market_date,
+                  token_id: str, price: float, size_usdc: float, status: dict):
+    """
+    Decide whether this leg should place a real order, and do so if eligible.
+
+    Returns (is_live, order_id, success, error, fee_paid). For a shadow combo,
+    is_live=False and the rest are None — the caller proceeds to record a plain
+    simulated TradeSimulation row exactly as before. For a live combo, this
+    enforces the already-held and global-exposure guards before calling
+    executor.buy_yes_fok(), mirroring weatherbot-ts strategy.ts's willExecute
+    block (lines 606-664, 681-732).
+    """
+    if not _is_live(location_id, mode, status):
+        return False, None, None, None, None
+
+    if _count_open_legs(session, location_id, mode, market_date) >= MAX_LEGS_PER_CITY_DATE:
+        return True, None, False, "already_holding_max_legs", None
+
+    if _count_open_live_positions(session) >= MAX_OPEN_LIVE_POSITIONS:
+        return True, None, False, "max_open_live_positions_reached", None
+
+    result = executor.buy_yes_fok(token_id, price, size_usdc=size_usdc)
+    return True, result.order_id, result.success, result.error, result.fee_paid
+
 # Dual-bucket entry price gates (mirror weatherbot-ts src/strategy.ts).
 # Floor applies to the neighbour only — the forecast-centre bucket F is always
 # kept regardless of price. Ceiling applies to both legs (a forecast-centre
@@ -96,10 +183,13 @@ BUCKET_MIN_PRICE = 0.12
 BUCKET_MAX_PRICE = 0.35
 
 # Provider-accuracy gate (mirror weatherbot-ts src/strategy.ts, added 2026-06-16).
-# Refuse to trade a city/mode whose matrix provider carries a debiased MAE wider than
-# one bucket. Unit-specific: US markets quote 2°F buckets, non-US markets quote 1°C
-# buckets, so the °C ceiling is tighter. A city with NO usable matrix MAE is treated as
-# unproven and SKIPPED (we do not trade a provider whose error is unmeasured).
+# The real selection already happened in provider_backtest.py's build_matrix(): it only
+# writes a (city, mode) cell when some provider's debiased MAE clears this same cap, so
+# any cell read here is already proven. This check is therefore a defensive re-verify
+# against a stale/hand-edited provider_matrix.json, not the primary gate — the primary
+# gate is "does a cell exist at all" (see the unproven-skip just above this block).
+# Unit-specific: US markets quote 2°F buckets, non-US markets quote 1°C buckets, so the
+# °C ceiling is tighter.
 MAX_PROVIDER_MAE_F = 1.5
 MAX_PROVIDER_MAE_C = 1.0
 
@@ -652,9 +742,19 @@ def record_dry_run(forecast: dict, session) -> None:
         })
 
     # Both legs pass — record them (skipping any that are already on the book)
+    live_status = _load_live_status()
     for leg in legs:
         if leg['existing']:
             print(f"   ⏭️  Leg {leg['idx']}: already placed YES  q={leg['mkt'].get('question','')[:50]}")
+            continue
+
+        is_live, order_id, live_success, live_error, fee_paid = _execute_leg(
+            session, _executor, location_id, mode, target_date,
+            leg['tok_yes'], leg['yes_ask'], SIM_SIZE_USD, live_status,
+        )
+        if is_live and not live_success:
+            print(f"   ❌ Leg {leg['idx']}: LIVE order blocked/failed ({live_error}) — not recorded  "
+                  f"q={leg['mkt'].get('question','')[:50]}")
             continue
 
         payout = round(SIM_SIZE_USD / leg['yes_ask'], 2)
@@ -671,10 +771,16 @@ def record_dry_run(forecast: dict, session) -> None:
             size=SIM_SIZE_USD,
             hours_to_peak=round(hours_to_peak, 2),
             simulated_pnl=None,
+            order_id=order_id,
+            dry_run=not is_live,
+            live_success=live_success,
+            live_error=live_error,
+            fee_paid=fee_paid,
         )
         session.add(sim)
         tag = 'F' if leg['idx'] == 1 else 'neighbour'
-        print(f"   📝 Leg {leg['idx']} ({tag}): distance={leg['cand']['distance']:.2f}° ask=${leg['yes_ask']:.3f} "
+        mode_tag = 'LIVE' if is_live else 'sim'
+        print(f"   📝 Leg {leg['idx']} ({tag}, {mode_tag}): distance={leg['cand']['distance']:.2f}° ask=${leg['yes_ask']:.3f} "
               f"cost=${SIM_SIZE_USD:.2f} payout=${payout:.2f}  q={leg['mkt'].get('question','')[:50]}")
 
 

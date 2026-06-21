@@ -91,6 +91,14 @@ class TradeSimulation(Base):
     hours_to_peak = Column(Numeric(6, 2), nullable=True)
     simulated_pnl = Column(Numeric(12, 2))
 
+    # Live-order fields — populated only when this leg was placed via WeatherExecutor
+    # in live mode (gated by ecmwf_live_status.json). NULL/default for shadow rows.
+    order_id = Column(String(128), nullable=True)
+    dry_run = Column(Boolean, default=True)
+    live_success = Column(Boolean, nullable=True)
+    live_error = Column(String(512), nullable=True)
+    fee_paid = Column(Numeric(12, 4), nullable=True)
+
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
 
@@ -506,6 +514,11 @@ def migrate_schema(engine) -> None:
         ("trade_simulations", "hours_to_peak",        "NUMERIC(6,2)"),
         ("weatherbot_signal_snapshots", "status",       "VARCHAR(8)"),
         ("weatherbot_signal_snapshots", "would_enter",  "BOOLEAN"),
+        ("trade_simulations", "order_id",      "VARCHAR(128)"),
+        ("trade_simulations", "dry_run",       "BOOLEAN DEFAULT TRUE"),
+        ("trade_simulations", "live_success",  "BOOLEAN"),
+        ("trade_simulations", "live_error",    "VARCHAR(512)"),
+        ("trade_simulations", "fee_paid",      "NUMERIC(12,4)"),
     ]
     widenings = [
         # Widen columns whose original size was too small (idempotent — VARCHAR widening never truncates)
