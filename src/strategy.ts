@@ -239,7 +239,9 @@ export async function run(options: RunOptions): Promise<void> {
 
     // Polymarket API often lags official resolution by 12-24h even when outcomePrices
     // already shows ["1","0"] or ["0","1"]. Use price as a fallback once expired.
-    if (resolvedWin === null && isExpired) {
+    // CRITICAL: Only use price as a fallback if we actually got a price (rawPrice != null).
+    // Never infer resolution from currentPrice == 0 (which happens when API fails).
+    if (resolvedWin === null && isExpired && rawPrice != null) {
       if (currentPrice >= 0.98) resolvedWin = true;
       else if (currentPrice <= 0.02) resolvedWin = false;
     }
@@ -314,7 +316,10 @@ export async function run(options: RunOptions): Promise<void> {
       } else {
         skip("Dry-run — not selling");
       }
-    } else if (resolvedWin === false || (isExpired && currentPrice <= 0.02)) {
+    } else if (resolvedWin === false || (isExpired && rawPrice != null && currentPrice <= 0.02)) {
+      // Only treat as confirmed loss if:
+      // 1. Market explicitly resolved NO, OR
+      // 2. Expired AND we got a real price (not null/0 from API failure) AND it's ≤$0.02
       exitsFound += 1;
       const pnl = -pos.cost;
       console.log(
@@ -340,7 +345,7 @@ export async function run(options: RunOptions): Promise<void> {
             // Ignore error, clear the position anyway to avoid zombie
           }
         }
-        
+
         sim.losses += 1;
         const trade: Trade = {
           type: "exit",
