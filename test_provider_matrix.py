@@ -137,3 +137,17 @@ def test_score_celsius_pairs_sane():
     assert round(s["mae"], 2) == 1.0
     assert round(s["bias"], 2) == 1.0
     assert round(s["mae_debiased"], 2) == 0.0  # constant offset removed
+
+
+# ── bucket_hit must measure the DEBIASED forecast (what the bot trades), not raw ──
+def test_bucket_hit_scores_debiased_forecast_not_raw():
+    """The live bot bets bucket(forecast + bias), so bucket_hit must score the
+    debiased forecast. A forecast that runs a constant +3°F hot but is otherwise
+    perfect lands the actual in the SAME bucket once debiased → 100% bucket_hit.
+    Scoring the raw (hot) forecast would wrongly report a low hit rate."""
+    # forecast = actual + 3 (consistently hot by 3°F). bias = mean(actual-fcst) = -3.
+    # debiased forecast = fcst - 3 = actual → same 2°F bucket every day → 100% hit.
+    pairs = [(83.0, 80.0), (85.0, 82.0), (87.0, 84.0), (89.0, 86.0)]
+    s = score(pairs, unit="F")
+    assert round(s["bias"], 2) == -3.0
+    assert s["bucket_hit"] == 1.0

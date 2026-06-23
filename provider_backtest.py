@@ -223,7 +223,10 @@ def score(pairs, unit="F"):
         "within1": sum(abs(e) <= 1 for e in errs) / n,
         "within3": sum(abs(e) <= 3 for e in errs) / n,
         "within1_db": sum(abs(e) <= 1 for e in derrs) / n,
-        "bucket_hit": sum(bucket(f, unit) == bucket(a, unit) for f, a in pairs) / n,
+        # The live bot bets bucket(forecast + bias), so bucket_hit must score the
+        # DEBIASED forecast (f + mean_e), not the raw forecast. Scoring raw made
+        # hot/cold-biased providers look near-0% when their debiased hit was 40-60%.
+        "bucket_hit": sum(bucket(f + mean_e, unit) == bucket(a, unit) for f, a in pairs) / n,
     }
 
 
@@ -254,11 +257,17 @@ def build_matrix(results, incumbent: dict, min_samples: int = 5,
                  city_units: dict | None = None) -> dict:
     """Pick the best provider per (city, mode) from backtest results.
 
-    7-day rolling selection (no hysteresis): the provider with the lowest
-    debiased MAE that meets the sample gate wins outright, every rebuild.
-    Responsiveness is the point — a short window must track regime shifts, so
-    we deliberately do NOT keep an incumbent. The `incumbent` arg is retained
-    only so the report can flag CHANGED cells.
+    Rolling selection (no hysteresis): the provider with the lowest debiased
+    MAE that meets the sample gate wins outright, every rebuild. Responsiveness
+    is the point — a short window must track regime shifts, so we deliberately
+    do NOT keep an incumbent. The `incumbent` arg is retained only so the report
+    can flag CHANGED cells. Window length is set by the caller (--days, default
+    30), chosen by EV: the live winning-leg price is ~$0.30, so a dual-bucket
+    trade needs >60% next-day hit to be +EV. A 119d×4-city walk-forward
+    (multi-provider daily reselection) shows only 30d clears that bar (63%hit /
+    51%coverage => +EV); shorter windows trade more but below breakeven (3d
+    57%/92%, 7d 53%/78%, 14d 58%/66% are all -EV), so their volume compounds
+    losses rather than capturing edge.
 
     Gates (a provider must clear BOTH to be eligible):
       - sample gate: >= min_samples (default 5) forecast/actual pairs.
@@ -322,7 +331,7 @@ def load_incumbent_matrix() -> dict:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--days", type=int, default=7)
+    ap.add_argument("--days", type=int, default=30)
     ap.add_argument("--lead", type=int, default=1, choices=range(1, 8),
                     help="forecast lead in days (previous_dayN)")
     ap.add_argument("--cities", default=None, help="comma list, default all")
