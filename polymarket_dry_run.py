@@ -602,7 +602,7 @@ def record_dry_run(forecast: dict, session) -> None:
         return
 
     raw_temp = float(forecast['forecast_temp'])
-    matrix_cell = load_provider_matrix().get(location_id, {}).get(mode)
+    matrix_cell = load_provider_matrix().get(pf_city(location_id), {}).get(mode)
     # Guard: a matrix cell is only usable if its unit matches the forecast's
     # unit. The cell stores "F"/"C"; the forecast stores "fahrenheit"/"celsius".
     # A mis-keyed cell (e.g. a °C bias landing on a °F forecast) would silently
@@ -813,7 +813,7 @@ def main(pending_only: bool = False) -> None:
         # no forecasts-table fallback).
         fc = None
         forecast_source_label = "forecasts table"
-        cell = matrix.get(loc_id, {}).get(mode_)
+        cell = matrix.get(pf_city(loc_id), {}).get(mode_)
         if cell and cell.get("provider") not in (None, "nws"):
             provider = cell["provider"]
             tz_name = LOCATION_TIMEZONES.get(loc_id, 'UTC')
@@ -847,7 +847,7 @@ def main(pending_only: bool = False) -> None:
         # Skip when the matrix names no usable provider or its forecast row is absent —
         # do NOT fall back to the forecasts-table aggregate (defect 1b).
         if fc is None:
-            cell = matrix.get(loc_id, {}).get(mode_)
+            cell = matrix.get(pf_city(loc_id), {}).get(mode_)
             if cell and cell.get("provider") not in (None, "nws"):
                 print(f"   ⏭️  {loc_id}/{mode_}: matrix provider {cell.get('provider')} "
                       f"has no provider_forecasts row for target date — skipping")
