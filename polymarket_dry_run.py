@@ -62,6 +62,16 @@ LOCATION_SLUGS = {
     'austin':       'austin',
 }
 
+# provider_forecasts.city uses 'nyc' for New York; the runtime keys everything
+# else by location_id, which equals provider_forecasts.city. Only NYC diverges.
+PROVIDER_FORECASTS_CITY: dict[str, str] = {"new_york": "nyc"}
+
+
+def pf_city(location_id: str) -> str:
+    """Map a runtime location_id to its provider_forecasts.city key."""
+    return PROVIDER_FORECASTS_CITY.get(location_id, location_id)
+
+
 # IANA timezone for each observatory — used to convert forecast valid time
 # (UTC) to the local calendar date that Polymarket markets are named after.
 LOCATION_TIMEZONES = {
@@ -852,7 +862,7 @@ def main(pending_only: bool = False) -> None:
                 WHERE city = :city AND mode = :mode AND provider = :prov
                   AND target_date = :tdate
                 ORDER BY captured_at DESC LIMIT 1
-            """), {"city": loc_id, "mode": mode_, "prov": provider,
+            """), {"city": pf_city(loc_id), "mode": mode_, "prov": provider,
                    "tdate": target_date}).fetchone()
             if row:
                 # Build a synthetic forecast dict compatible with record_dry_run
