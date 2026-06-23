@@ -606,8 +606,10 @@ def record_dry_run(forecast: dict, session) -> None:
     # Guard: a matrix cell is only usable if its unit matches the forecast's
     # unit. The cell stores "F"/"C"; the forecast stores "fahrenheit"/"celsius".
     # A mis-keyed cell (e.g. a °C bias landing on a °F forecast) would silently
-    # corrupt bucket selection — so on mismatch we ignore the cell and fall
-    # through to static/0. Cells without a unit (legacy) are treated as matching.
+    # corrupt bucket selection — so on mismatch we set matrix_cell = None, which
+    # then fails the MAE gate / resolve_bias below and SKIPS the city/mode (there
+    # is no longer a static/0 fallback). Cells without a unit (legacy) are treated
+    # as matching.
     fc_unit = "C" if forecast['units'] == 'celsius' else "F"
     if matrix_cell is not None:
         cell_unit = matrix_cell.get("unit")
@@ -812,6 +814,8 @@ def main(pending_only: bool = False) -> None:
         # with a provider_forecasts row for the target date, or we skip (defect 1b —
         # no forecasts-table fallback).
         fc = None
+        # Placeholder only — never persisted: a city either gets the
+        # provider_forecasts label below or is skipped (no forecasts-table path).
         forecast_source_label = "forecasts table"
         cell = matrix.get(pf_city(loc_id), {}).get(mode_)
         if cell and cell.get("provider") not in (None, "nws"):
