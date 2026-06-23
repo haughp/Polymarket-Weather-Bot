@@ -134,6 +134,22 @@ def fetch_actuals(station, start, end):
     return out
 
 
+# US cities whose Polymarket settlement station is also present in the
+# `outcomes` table (the bot's own settlement source) — these must be graded
+# against `outcomes`, not a hand-picked IEM CLI station, because two of the
+# original station picks (NYC -> KLGA, Dallas -> KDAL) disagree with the
+# actual Polymarket resolution station (Central Park, DFW) by up to 4°F.
+# The remaining 4 US cities (houston, denver, los-angeles, san-francisco) have
+# no `outcomes` rows yet, so they stay on IEM CLI and are flagged unverified.
+US_IN_OUTCOMES = {"nyc", "chicago", "miami", "dallas", "seattle", "atlanta", "austin"}
+_DB_LOC = {"nyc": "new_york"}  # provider_backtest city -> outcomes.location_id
+
+
+def us_actuals_source(city: str) -> str:
+    """Which ground-truth source a US city uses for scoring."""
+    return "settlement_db" if city in US_IN_OUTCOMES else "iem_cli_unverified"
+
+
 # DSN for the bot's postgres (non-US actuals live in `outcomes`). Mirrors the
 # default used by capture_provider_forecasts.py / polymarket_dry_run.py.
 DB_DSN = os.getenv("DATABASE_URL", "postgresql://padraighaughey@localhost:5432/gmgn_trading")
@@ -345,15 +361,20 @@ def main():
     cities = args.cities.split(",") if args.cities else list(CITIES)
 
     results = {}  # city -> mode -> model -> metrics
+    actuals_unverified = {}  # city -> bool, US cities still on a non-settlement IEM station
     for city in cities:
         cfg = CITIES[city]
         unit = cfg.get("unit", "F")
         if cfg.get("db_actuals"):
             src = f"outcomes DB (°{unit})"
             actuals = fetch_actuals_db(city, start, end)
+        elif city in US_IN_OUTCOMES:
+            src = f"outcomes DB (°{unit}) [settlement_db]"
+            actuals = fetch_actuals_db(_DB_LOC.get(city, city), start, end)
         else:
-            src = f"{cfg['station']} CLI (°{unit})"
+            src = f"{cfg['station']} CLI (°{unit}) [UNVERIFIED vs settlement]"
             actuals = fetch_actuals(cfg["station"], start, end)
+            actuals_unverified[city] = True
         print(f"[{city}] actuals from {src} + {len(MODELS)} models "
               f"@ lead {args.lead}d, {start} → {end} ...", file=sys.stderr)
         forecasts = fetch_forecasts(cfg, start, end, args.lead, MODELS)
@@ -373,7 +394,10 @@ def main():
 
     meta = {"start": start.isoformat(), "end": end.isoformat(),
             "lead_days": args.lead, "models": MODELS,
-            "actuals_source": "US: NWS CLI via IEM (°F); non-US: outcomes DB table (°C)"}
+            "actuals_source": "US (settlement_db cities): outcomes DB table (°F); "
+                               "US (iem_cli_unverified cities): NWS CLI via IEM (°F), "
+                               "not confirmed against settlement; non-US: outcomes DB table (°C)",
+            "actuals_unverified_cities": sorted(actuals_unverified)}
     with open(args.out, "w") as f:
         json.dump({"meta": meta, "results": results}, f, indent=2)
 
