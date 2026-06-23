@@ -13,6 +13,7 @@ upper bound for finite buckets, and containment is half-open [lo, hi).
 
 import pytest
 
+import polymarket_dry_run as pdr
 from polymarket_dry_run import (
     parse_temp_range,
     classify_markets,
@@ -110,45 +111,50 @@ def test_us_dallas_regression_F_kept_below_floor():
     cands = _candidates(
         ("between 82-83°F", 0.08),
         ("between 84-85°F", 0.05),   # F — cheap but correct
-        ("between 86-87°F", 0.19),   # F+1 (higher priced of the two neighbours)
+        ("between 86-87°F", 0.19),   # F+1 — chosen: pos=(85.95-84)/2=0.975, HIGH half
         ("between 88-89°F", 0.28),
     )
     res = select_entry_pair(cands, 85.95, **GATE)
     assert res["ok"] is True
     assert res["pair"][0]["range"] == (84.0, 86.0)   # F first
-    assert res["pair"][1]["range"] == (86.0, 88.0)   # higher-priced neighbour
+    assert res["pair"][1]["range"] == (86.0, 88.0)   # upper neighbour (high in-bucket position)
 
 
-def test_higher_priced_neighbour_wins():
+def test_in_bucket_position_picks_lower_neighbour_us():
+    # forecast 70.5 in F=[70,72) -> pos=(70.5-70)/2=0.25, LOW half -> lower neighbour [68,70).
     cands = _candidates(
-        ("between 68-69°F", 0.15),   # below
+        ("between 68-69°F", 0.15),   # below — low-position pick
         ("between 70-71°F", 0.05),   # F
-        ("between 72-73°F", 0.20),   # above — pricier
+        ("between 72-73°F", 0.20),   # above — pricier, but NOT chosen (position rule, not price)
     )
     res = select_entry_pair(cands, 70.5, **GATE)
     assert res["ok"] is True
     assert res["pair"][0]["range"] == (70.0, 72.0)
-    assert res["pair"][1]["range"] == (72.0, 74.0)
+    assert res["pair"][1]["range"] == (68.0, 70.0)
 
 
 def test_celsius_neighbour_step_is_one_degree():
     # °C buckets are 1° wide; F=[22,23), neighbours are [21,22) and [23,24).
+    # forecast 22.4 -> pos=(22.4-22)/1=0.4, LOW half -> lower neighbour [21,22).
     cands = _candidates(
         ("be 21°C", 0.15),
         ("be 22°C", 0.18),           # F (forecast 22.4)
-        ("be 23°C", 0.25),           # above — pricier
+        ("be 23°C", 0.25),           # above — pricier, but NOT chosen (low position)
     )
     res = select_entry_pair(cands, 22.4, **GATE)
     assert res["ok"] is True
     assert res["pair"][0]["range"] == (22.0, 23.0)
-    assert res["pair"][1]["range"] == (23.0, 24.0)
+    assert res["pair"][1]["range"] == (21.0, 22.0)
 
 
 def test_abort_when_chosen_neighbour_over_ceiling():
+    # forecast 70.5 in F=[70,72) -> LOW half -> lower neighbour [68,69) chosen by position,
+    # priced under the ceiling, so this aborts via the ceiling check on the *other* side
+    # being irrelevant — assert against the actually-chosen (lower) neighbour's ceiling.
     cands = _candidates(
-        ("between 68-69°F", 0.20),
+        ("between 68-69°F", 0.42),   # lower neighbour — chosen by position, but > 0.35 ceiling
         ("between 70-71°F", 0.10),   # F ok
-        ("between 72-73°F", 0.42),   # pricier neighbour but > 0.35 ceiling
+        ("between 72-73°F", 0.20),   # above — not chosen (low position)
     )
     res = select_entry_pair(cands, 70.5, **GATE)
     assert res["ok"] is False
@@ -196,3 +202,33 @@ def test_abort_when_F_has_no_neighbour():
     cands = _candidates(("between 70-71°F", 0.20))   # F only, no neighbour
     res = select_entry_pair(cands, 70.5, **GATE)
     assert res["ok"] is False
+
+
+def _cand(lo, hi, width, price):
+    return {"market": {}, "question": f"[{lo},{hi})", "range": (lo, hi),
+            "width": width, "midpoint": (lo + hi) / 2, "yes_price": price}
+
+
+def test_second_leg_high_position_picks_upper_neighbour():
+    # corrected 37.8 sits in the HIGH half of [37,38) -> neighbour should be [38,39)
+    cands = [_cand(36, 37, 1, 0.30), _cand(37, 38, 1, 0.20), _cand(38, 39, 1, 0.15)]
+    out = pdr.select_entry_pair(cands, 37.8, min_price=0.12, max_price=0.35)
+    assert out["ok"]
+    assert out["pair"][0]["range"] == (37, 38)         # F
+    assert out["pair"][1]["range"] == (38, 39)         # upper neighbour
+
+
+def test_second_leg_low_position_picks_lower_neighbour():
+    # corrected 37.2 sits in the LOW half of [37,38) -> neighbour should be [36,37)
+    cands = [_cand(36, 37, 1, 0.15), _cand(37, 38, 1, 0.20), _cand(38, 39, 1, 0.30)]
+    out = pdr.select_entry_pair(cands, 37.2, min_price=0.12, max_price=0.35)
+    assert out["ok"]
+    assert out["pair"][0]["range"] == (37, 38)
+    assert out["pair"][1]["range"] == (36, 37)         # lower neighbour
+
+
+def test_second_leg_skips_when_neighbour_below_floor():
+    # low-position -> lower neighbour, but its price 0.05 < floor 0.12 -> not ok
+    cands = [_cand(36, 37, 1, 0.05), _cand(37, 38, 1, 0.20)]
+    out = pdr.select_entry_pair(cands, 37.2, min_price=0.12, max_price=0.35)
+    assert not out["ok"]

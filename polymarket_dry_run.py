@@ -413,11 +413,14 @@ def select_entry_pair(
     min_price: float,
     max_price: float,
 ) -> dict:
-    """F + higher-priced-neighbour entry selection (ported from weatherbot-ts).
+    """F + in-bucket-position-neighbour entry selection.
 
     Buy the forecast-centre bucket F (the bucket whose half-open interval contains
-    `corrected_temp`) plus the single adjacent neighbour (F±width) the MARKET prices
-    higher. `candidates` are classify_markets() dicts (carry range/width/yes_price).
+    `corrected_temp`) plus the single adjacent neighbour (F±width) on the side of F's
+    interval that `corrected_temp` sits in: HIGH half (>= midpoint) -> upper neighbour
+    (F_hi); LOW half -> lower neighbour (F_lo - width). Validated 2026-06-23 to beat
+    the prior "market picks higher-priced neighbour" rule by +25-27pp. `candidates`
+    are classify_markets() dicts (carry range/width/yes_price).
 
     Price gates (mirror weatherbot-ts):
       - floor (min_price) applies to the NEIGHBOUR only — F is always kept, even
@@ -457,8 +460,19 @@ def select_entry_pair(
     if not neighbours:
         return {"ok": False, "reason": f"no neighbour bucket adjacent to F {F['range']}"}
 
-    # Higher YES price wins — "let the market decide".
-    neighbour = max(neighbours, key=lambda c: c['yes_price'] if c['yes_price'] is not None else 0.0)
+    # Second leg by IN-BUCKET POSITION of the corrected forecast (validated 2026-06-23:
+    # +25-27pp vs bias-sign). High half of F's interval -> upper neighbour; low half ->
+    # lower neighbour. Falls back to whichever neighbour exists if only one is listed.
+    # "Upper" / "lower" is by adjacency to F (its range start is >= F's, vs < F's) —
+    # not literal f_hi/f_lo arithmetic, which is undefined for an open-ended F tail.
+    pos = (corrected_temp - f_lo) / width if (f_lo is not None and width) else 0.5
+    want_upper = pos >= 0.5
+    f_start = f_lo if f_lo is not None else f_hi
+    upper = next((c for c in neighbours if (c['range'][0] if c['range'][0] is not None else c['range'][1]) > f_start), None)
+    lower = next((c for c in neighbours if (c['range'][0] if c['range'][0] is not None else c['range'][1]) < f_start), None)
+    neighbour = (upper or lower) if want_upper else (lower or upper)
+    if neighbour is None:
+        return {"ok": False, "reason": f"no neighbour bucket adjacent to F {F['range']}"}
 
     # Ceiling applies to both legs; floor to the neighbour only.
     if F['yes_price'] is not None and F['yes_price'] > max_price:
