@@ -689,7 +689,7 @@ def record_dry_run(forecast: dict, session) -> None:
         return (f"[{rng[0]}, {rng[1]}]" if rng[0] is not None and rng[1] is not None
                 else (f"≤{rng[1]}" if rng[0] is None else f"≥{rng[0]}"))
 
-    print(f"   ℹ️  Found {len(candidates)} markets; selected F + higher-priced neighbour:")
+    print(f"   ℹ️  Found {len(candidates)} markets; selected F + in-bucket-position neighbour:")
     print(f"      F        {_rng_label(pair[0])} yes=${pair[0]['yes_price']:.3f}  q={pair[0]['question'][:50]}")
     print(f"      neighbour {_rng_label(pair[1])} yes=${pair[1]['yes_price']:.3f}  q={pair[1]['question'][:50]}")
 
