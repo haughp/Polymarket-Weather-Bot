@@ -203,83 +203,6 @@ BUCKET_MAX_PRICE = 0.35
 MAX_PROVIDER_MAE_F = 1.5
 MAX_PROVIDER_MAE_C = 1.0
 
-# Per-location, per-mode ECMWF forecast bias correction.
-# Convention: bias = (expected_actual − ecmwf_forecast).
-#   Positive → ECMWF runs cold (actual warmer) → shift bucket selection up.
-#   Negative → ECMWF runs warm (actual cooler) → shift bucket selection down.
-#
-# STALE — May 2026 ECMWF-IFS-vs-ERA5 backtest, do not extend. Cold-start fallback only.
-# Live overrides via _load_live_bias() are authoritative for any cell with
-# ≥5 verified samples in the last 45 days. As of the 2026-06 IEM migration those
-# live values are the median forecast-vs-airport-METAR error (the source Polymarket
-# settles on), not ERA5 — so this static dict is now only used before a city has 5
-# resolved samples.
-FORECAST_BIAS: dict[str, dict[str, float]] = {
-    #                max    min
-    'new_york': {'max': +0.8, 'min': -0.1},
-    'dallas':   {'max': +0.8, 'min':  0.0},
-    'atlanta':  {'max': +1.1, 'min':  0.0},
-}
-
-# Frozen snapshot of static cells so per-trade telemetry can distinguish
-# `source=static` from `source=live` after the live loader merges into FORECAST_BIAS.
-_STATIC_BIAS_KEYS: set[tuple[str, str]] = {
-    (loc, mode) for loc, modes in FORECAST_BIAS.items() for mode in modes
-}
-
-# Populated per main() call by _load_live_bias(). FORECAST_BIAS stays an immutable
-# cold-start constant; live values live here so the static fallback is never clobbered.
-LIVE_BIAS: dict[str, dict[str, float]] = {}    # (loc, mode) → live median bias
-LIVE_BIAS_N: dict[str, dict[str, int]] = {}    # (loc, mode) → resolved-sample count
-
-
-def _load_live_bias(session, min_samples: int = 5, days_back: int = 45) -> dict:
-    """Return median(actual − forecast) per (location_id, mode) from resolved outcomes.
-
-    Forecast bias is a slowly-varying *level*, not a fast signal, so a robust median
-    over the full window beats a recency-weighted mean: the median ignores the
-    occasional bad-reading outlier instead of letting it swing the correction by a
-    whole bucket. Only cells with ≥ min_samples resolved days are included; others
-    keep the static value (or 0 if not in FORECAST_BIAS).
-
-    NOTE: ground truth comes from `outcomes`, which (post-2026-06 migration) is the
-    airport-METAR reading Polymarket settles on — see outcome_backfiller.IEM_STATIONS.
-    For IEM_EXCLUDED cities (hong_kong, shenzhen) `outcomes` is still ERA5, so their
-    bias remains untrustworthy until a proper source is wired in.
-
-    Returns: {location_id: {mode: (bias_degrees, n_samples)}}
-    """
-    from sqlalchemy import text
-    sql = text(f"""
-        WITH latest_per_date AS (
-            SELECT DISTINCT ON (location_id, mode, DATE(peak_time))
-                location_id, mode, forecast_temp, DATE(peak_time) AS fdate
-            FROM forecasts
-            WHERE peak_time > NOW() - INTERVAL '{days_back} days'
-            ORDER BY location_id, mode, DATE(peak_time), ecmwf_run DESC
-        ),
-        errors AS (
-            SELECT f.location_id, f.mode,
-                   (CASE WHEN f.mode = 'max' THEN o.actual_max_temp
-                         ELSE o.actual_min_temp END - f.forecast_temp) AS err
-            FROM latest_per_date f
-            JOIN outcomes o ON f.location_id = o.location_id AND f.fdate = DATE(o.date)
-            WHERE o.verified = TRUE
-        )
-        SELECT location_id, mode,
-               PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY err) AS median_bias,
-               COUNT(*) AS n
-        FROM errors
-        GROUP BY location_id, mode
-        HAVING COUNT(*) >= :min_samples
-    """)
-    rows = session.execute(sql, {'min_samples': min_samples}).fetchall()
-    live: dict = {}
-    for loc, mode, bias, n in rows:
-        live.setdefault(loc, {})[mode] = (round(float(bias), 1), int(n))
-    return live
-
-
 # ── Gamma API helpers ──────────────────────────────────────────────────────────
 
 def fetch_event_markets(location_slug: str, date: datetime.date, mode: str = 'max') -> list[dict]:
@@ -594,6 +517,14 @@ ENTRY_WINDOW_OPEN_H  = 42     # Earliest hours-before-peak the bot will trade
 ENTRY_WINDOW_CLOSE_H = 18     # Latest hours-before-peak the bot will trade
 
 
+def resolve_bias(location_id: str, mode: str, matrix_cell: dict | None):
+    """Bias for the F decision = the matrix cell's bias ONLY (sign: corrected = raw + bias).
+    Returns (bias_float, source_str) or None if there is no usable cell (caller skips)."""
+    if matrix_cell is None:
+        return None
+    return float(matrix_cell.get("bias", 0.0)), f"matrix(provider={matrix_cell.get('provider','?')})"
+
+
 def record_dry_run(forecast: dict, session) -> None:
     """
     Spec: forecast → top-2 closest market buckets by midpoint distance →
@@ -674,19 +605,11 @@ def record_dry_run(forecast: dict, session) -> None:
               f"{mae:.2f}°{fc_unit} > {mae_gate}°{fc_unit} gate — skipping")
         return
 
-    if mode in LIVE_BIAS_N.get(location_id, {}):
-        # Live outcome-based bias always wins (highest priority)
-        bias = LIVE_BIAS.get(location_id, {}).get(mode, 0.0)
-        source = f"live(n={LIVE_BIAS_N[location_id][mode]})"
-    elif matrix_cell is not None:
-        bias = matrix_cell.get("bias", 0.0)
-        source = f"matrix(provider={matrix_cell.get('provider','?')})"
-    elif (location_id, mode) in _STATIC_BIAS_KEYS:
-        bias = FORECAST_BIAS.get(location_id, {}).get(mode, 0.0)
-        source = "static"
-    else:
-        bias = 0.0
-        source = "none"
+    _bias = resolve_bias(location_id, mode, matrix_cell)
+    if _bias is None:
+        print(f"   ⏭️  No usable matrix cell for {location_id}/{mode} — skipping")
+        return
+    bias, source = _bias
     corrected_temp = raw_temp + bias
     units_label_inner = '°F' if forecast['units'] == 'fahrenheit' else '°C'
     print(f"   📐 Bias: raw={raw_temp:.1f}{units_label_inner} "
@@ -801,15 +724,8 @@ def main(pending_only: bool = False) -> None:
 
     session = init_database(auto_migrate=not pending_only)
 
-    # Refresh bias from resolved outcomes — live values override static fallback.
-    # Stored in LIVE_BIAS / LIVE_BIAS_N (NOT written back into FORECAST_BIAS, which
-    # stays an immutable cold-start constant for the `source=static` path).
-    for loc, modes in _load_live_bias(session).items():
-        for mode, (bias, n) in modes.items():
-            LIVE_BIAS.setdefault(loc, {})[mode] = bias
-            LIVE_BIAS_N.setdefault(loc, {})[mode] = n
-
-    # Load the most recent forecast for each location (fallback path)
+    # Load the most recent forecast for each location (metadata enrichment for the
+    # matrix-provider path; record_dry_run's bias now comes from the matrix cell only)
     from sqlalchemy import func, text as sa_text
     def _get_latest_from_forecasts(loc_id, mode_):
         subq = (
@@ -845,8 +761,9 @@ def main(pending_only: bool = False) -> None:
     print(f"\n🔍 Processing {len(loc_modes)} forecast locations…")
 
     for (loc_id, mode_) in loc_modes:
-        # Matrix-aware forecast fetch: prefer provider_forecasts table when matrix
-        # assigns a non-NWS provider; fall back to forecasts table otherwise.
+        # Matrix-aware forecast fetch: the matrix must assign a non-NWS provider
+        # with a provider_forecasts row for the target date, or we skip (defect 1b —
+        # no forecasts-table fallback).
         fc = None
         forecast_source_label = "forecasts table"
         cell = matrix.get(loc_id, {}).get(mode_)
@@ -880,9 +797,15 @@ def main(pending_only: bool = False) -> None:
                     })()
                     forecast_source_label = f"provider_forecasts({provider})"
 
+        # Skip when the matrix names no usable provider or its forecast row is absent —
+        # do NOT fall back to the forecasts-table aggregate (defect 1b).
         if fc is None:
-            fc = _get_latest_from_forecasts(loc_id, mode_)
-        if fc is None:
+            cell = matrix.get(loc_id, {}).get(mode_)
+            if cell and cell.get("provider") not in (None, "nws"):
+                print(f"   ⏭️  {loc_id}/{mode_}: matrix provider {cell.get('provider')} "
+                      f"has no provider_forecasts row for target date — skipping")
+            else:
+                print(f"   ⏭️  {loc_id}/{mode_}: matrix cell has no usable provider — skipping")
             continue
 
         if pending_only:
