@@ -13,12 +13,15 @@ settlement `outcomes` table) established that the live ECMWF F-bucket selection 
 materially worse than it should be, for two confirmed bugs plus two suboptimal
 config choices:
 
-1. **Forecast-source mismatch (bug).** The runtime *selects* and *gates* providers
-   using the multi-provider matrix (debiased MAE ~1.09°C non-US) but then *places
-   the F bucket* using a different, worse forecast: the single `forecasts`-table
-   aggregate (MAE ~1.51°C) plus a 45-day `LIVE_BIAS` median. The trade path does not
-   consume the matrix-selected provider's forecast. This is the dominant driver of
-   the recent F-hit collapse (38% → 12% over Jun 18–22).
+1. **Forecast-source mismatch (bug, 3 sub-defects).** The runtime *selects* and *gates*
+   providers using the multi-provider matrix (debiased MAE ~1.09°C non-US) but then *places
+   the F bucket* using a different, worse forecast: the single `forecasts`-table aggregate
+   (MAE ~1.51°C) plus a 45-day `LIVE_BIAS` median. A matrix-aware fetch path exists but
+   silently falls back via three defects (see §3.1): (1a) a `new_york`→`nyc` city-key alias
+   mismatch that makes NYC always fall back; (1b) null-provider matrix cells (e.g. london)
+   falling back instead of skipping; (1c) the `LIVE_BIAS` cascade overriding the matrix
+   bias even on the working path. Together these are the dominant driver of the recent
+   F-hit collapse (38% → 12% over Jun 18–22).
 
 2. **US ground-truth station mis-grading (bug).** The offline/backtest `CITIES` config
    grades NYC against LaGuardia (KLGA) and Dallas against Love Field (KDAL), but
@@ -96,9 +99,27 @@ Components, each independently testable:
 
 ### 3.1 Leg-1 forecast-source fix (bug 1)
 
+A matrix-aware fetch path already exists (`polymarket_dry_run.py` ~L838–871) but
+silently falls back to the `forecasts`-table aggregate via **three distinct defects**,
+all confirmed by inspection of the live DB on 2026-06-23. All three MUST be fixed:
+
+- **Defect 1a — city-key alias.** The provider-forecast lookup queries
+  `provider_forecasts WHERE city = :city` with `city = location_id` (e.g. `new_york`),
+  but capture stores NYC under `city = 'nyc'`. Result: `new_york max→ncep_nbm_conus` and
+  `new_york min→gfs_seamless` return 0 rows → NYC ALWAYS falls back. Fix: map
+  `location_id → provider_forecasts.city` (`new_york → nyc`) in the lookup. Verified: the
+  rows exist under `nyc` (408 NBM, 240 GFS) but not `new_york` (0).
+- **Defect 1b — null-provider cells.** A matrix cell with `provider = None` (e.g. `london`)
+  fails the `provider not in (None,"nws")` guard → fallback. Fix: such a cell is not
+  usable; **skip the city/mode** (do not fall back to the forecasts-table aggregate).
+- **Defect 1c — bias-source override.** Even on the working provider path, `record_dry_run`
+  applies `LIVE_BIAS` (45-day median computed from the `forecasts` table) ahead of the
+  matrix cell's bias. Fix: see the bias-cascade collapse below.
+
 - The bucket-decision path MUST use the forecast from the provider named in the matrix
   cell for `(location_id, mode)`. It MUST NOT use the `forecasts`-table aggregate for the
-  F decision.
+  F decision. When the matrix provider's `provider_forecasts` row is absent for the target
+  date, **skip the city/mode** — do NOT fall back to the forecasts-table value.
 - Bias applied MUST be the matrix cell's `bias`. **Sign convention (matches existing
   `provider_backtest.py::score`, which is authoritative):** `bias = mean(actual − forecast)`
   over the window, and `corrected = forecast + bias`. (Equivalently `corrected = forecast −
