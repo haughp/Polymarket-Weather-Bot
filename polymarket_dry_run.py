@@ -12,7 +12,7 @@ import json
 import datetime
 import httpx
 from zoneinfo import ZoneInfo
-from database_schema import init_database, Forecast, MarketState, MarketBucket, TradeSimulation
+from database_schema import init_database, Forecast, MarketState, MarketBucket, TradeSimulation, LadderSnapshot
 from execution.weather_executor import WeatherExecutor
 
 GAMMA_API = "https://gamma-api.polymarket.com"
@@ -485,6 +485,20 @@ def select_entry_pair(
     return {"ok": True, "pair": [F, neighbour]}
 
 
+def build_ladder_rows(location_id, mode, market_date, candidates, F, neighbour):
+    """Pure: build ladder-snapshot dicts for every candidate bucket. No DB, no side effects."""
+    rows = []
+    for c in candidates:
+        lo, hi = c["range"]
+        rows.append({
+            "location_id": location_id, "mode": mode, "market_date": market_date,
+            "bucket_lo": lo, "bucket_width": c.get("width"),
+            "yes_price": c.get("yes_price"),
+            "is_F": c is F, "is_second_leg": c is neighbour,
+        })
+    return rows
+
+
 # ── Price / book helpers ───────────────────────────────────────────────────────
 
 def extract_prices(market: dict | None) -> tuple[float | None, float | None]:
@@ -648,6 +662,17 @@ def record_dry_run(forecast: dict, session) -> None:
         print(f"   ⏭️  Selection: {selection['reason']}")
         return
     pair = selection['pair']
+
+    # ── Read-only candidate-ladder logging (observational, never gates trading) ──
+    # Records every candidate bucket's price for forward EV analysis of the
+    # second leg. Wrapped so a logging failure can never block or alter the
+    # trade decision above — build_ladder_rows is pure (no DB/I-O).
+    try:
+        for r in build_ladder_rows(location_id, mode, str(target_date),
+                                   candidates, pair[0], pair[1]):
+            session.add(LadderSnapshot(**r))
+    except Exception as e:
+        print(f"   ⚠️  ladder logging skipped: {e}")
 
     def _rng_label(c):
         rng = c['range']

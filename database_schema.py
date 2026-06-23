@@ -486,6 +486,24 @@ class PrecipStrategyTrade(Base):
     created_at       = Column(DateTime, default=datetime.datetime.utcnow)
 
 
+class LadderSnapshot(Base):
+    """Read-only candidate-bucket ladder per scan, for forward EV analysis of the
+    second leg. Populated alongside (never instead of) the actual trade decision —
+    see polymarket_dry_run.build_ladder_rows / record_dry_run."""
+    __tablename__ = "ladder_snapshots"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    captured_at = Column(DateTime, default=datetime.datetime.utcnow, index=True)
+    location_id = Column(String(32), index=True)
+    mode = Column(String(16), default='max', index=True)
+    market_date = Column(Date, index=True)
+    bucket_lo = Column(Numeric(5, 1))
+    bucket_width = Column(Numeric(4, 1))
+    yes_price = Column(Numeric(5, 4))
+    is_F = Column(Boolean, default=False)
+    is_second_leg = Column(Boolean, default=False)
+
+
 def migrate_schema(engine) -> None:
     """Add columns introduced after initial deployment. Idempotent — safe to re-run."""
     additions = [
