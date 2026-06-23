@@ -667,10 +667,18 @@ def record_dry_run(forecast: dict, session) -> None:
     # Records every candidate bucket's price for forward EV analysis of the
     # second leg. Wrapped so a logging failure can never block or alter the
     # trade decision above — build_ladder_rows is pure (no DB/I-O).
+    # The actual INSERT only happens at flush/commit (SQLAlchemy validates column
+    # types then, not at add()), and the real TradeSimulation row is committed
+    # later via the same shared session.commit(). So the ladder write is done
+    # inside its own SAVEPOINT (begin_nested): begin_nested() flushes on exit,
+    # which means a malformed row errors HERE, inside the try, and only the
+    # savepoint is rolled back — the outer transaction (and the trade record
+    # committed alongside it) is unaffected.
     try:
-        for r in build_ladder_rows(location_id, mode, str(target_date),
-                                   candidates, pair[0], pair[1]):
-            session.add(LadderSnapshot(**r))
+        with session.begin_nested():
+            for r in build_ladder_rows(location_id, mode, str(target_date),
+                                       candidates, pair[0], pair[1]):
+                session.add(LadderSnapshot(**r))
     except Exception as e:
         print(f"   ⚠️  ladder logging skipped: {e}")
 
