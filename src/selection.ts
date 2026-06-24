@@ -2,8 +2,10 @@
 //
 // Rule (replaces the old top-2-by-midpoint-distance logic):
 //   F        = the bucket whose interval contains the bias-adjusted forecast
-//   neighbor = whichever of F+1 / F−1 the MARKET prices higher (higher YES
-//              price ⇒ the crowd assigns it more probability)
+//   neighbor = the F+1 / F−1 bucket on the side of F's interval the bias-adjusted
+//              forecast sits in (pos >= 0.5 → upper F+1, else lower F−1);
+//              falls back to whichever neighbour is listed if the preferred side
+//              is absent. (Migrated from the ECMWF bot, 2026-06-24.)
 //   pair     = [F, neighbor]  (F always first ⇒ snapshot bucket1 = F)
 //
 // Floor/ceiling are split:
@@ -60,10 +62,14 @@ export function selectEntryPair<T extends SelectableBucket>(
     return { ok: false, reason: `no neighbour bucket adjacent to F (${F.range[0]}-${F.range[1]})` };
   }
 
-  // Higher YES price wins — "let the market decide". Missing/NaN price ranks 0.
+  // In-bucket position of the bias-adjusted forecast picks the neighbour:
+  // HIGH half of F (pos >= 0.5) -> upper neighbour (F+1); LOW half -> lower (F-1).
+  // Prefer the position side; fall back to whichever neighbour IS listed when the
+  // preferred side is absent (grid edge / missing bucket / tail F — a tail F lists
+  // only one neighbour, so the fallback returns it regardless of pos). 2°F buckets.
   const safePrice = (p: number) => (Number.isFinite(p) ? p : 0);
-  candidates.sort((a, b) => safePrice(b.price) - safePrice(a.price));
-  const neighbor = candidates[0];
+  const pos = fLow === -999 ? 0 : (adjustedForecastTemp - fLow) / 2;
+  const neighbor = pos >= 0.5 ? (above ?? below)! : (below ?? above)!;
 
   // Ceiling applies to BOTH legs.
   if (safePrice(F.price) > gate.maxPrice) {
