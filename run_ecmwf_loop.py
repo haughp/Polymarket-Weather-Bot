@@ -29,6 +29,39 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+# Singleton guard. On 2026-06-24 a second, manually-launched copy of this loop ran
+# concurrently with the launchd job for ~22h in LIVE mode (ECMWF_LIVE_TRADING=1)
+# while the launchd job was dry-run — the "fix" only corrected the launchd plist and
+# never killed the orphan. Only a CLOB precision-rejection bug prevented real fills.
+# Refuse to start if another instance already holds the lock, so a stray manual
+# launch (or a missed kill) can't silently run a divergent mode in parallel.
+_PIDFILE = os.path.join(WEATHER_BOT_DIR, ".ecmwf_loop.pid")
+
+
+def _acquire_singleton_lock() -> None:
+    """Exit if another run_ecmwf_loop.py instance is already running."""
+    if os.path.exists(_PIDFILE):
+        try:
+            with open(_PIDFILE) as fh:
+                other = int(fh.read().strip())
+        except (ValueError, OSError):
+            other = None
+        if other and other != os.getpid():
+            try:
+                os.kill(other, 0)  # signal 0 = liveness probe, doesn't kill
+            except ProcessLookupError:
+                log.warning("Stale PID file (%s, pid %s gone) — taking over.", _PIDFILE, other)
+            except PermissionError:
+                # Process exists under another user/perm — treat as alive, refuse.
+                log.error("Another ECMWF loop is already running (pid %s). Exiting.", other)
+                sys.exit(1)
+            else:
+                log.error("Another ECMWF loop is already running (pid %s). Exiting.", other)
+                sys.exit(1)
+    with open(_PIDFILE, "w") as fh:
+        fh.write(str(os.getpid()))
+    log.info("Singleton lock acquired (pid %s, %s)", os.getpid(), _PIDFILE)
+
 
 def _next_ecmwf_utc() -> datetime.datetime:
     """UTC datetime of the next ECMWF data availability window (04:30, 10:30, 16:30, 22:30)."""
@@ -204,8 +237,15 @@ def show_recent() -> None:
 
 
 def main() -> None:
+    _acquire_singleton_lock()
     log.info("ECMWF Weather Pipeline Loop Runner started")
     log.info("Working directory: %s", WEATHER_BOT_DIR)
+    log.info(
+        "LIVE/DRY switch: ECMWF_LIVE_TRADING=%s (%s)",
+        os.environ.get("ECMWF_LIVE_TRADING", "<unset>"),
+        "LIVE — real orders enabled" if os.environ.get("ECMWF_LIVE_TRADING") == "1"
+        else "DRY RUN — simulated only",
+    )
 
     _run_pipeline(full_refresh=True)
     next_ecmwf = _next_ecmwf_utc()

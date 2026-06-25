@@ -62,3 +62,6 @@ yarn-error.log*
 # OS
 .DS_Store
 Thumbs.db
+
+# ECMWF loop singleton PID file (runtime, do not track)
+.ecmwf_loop.pid

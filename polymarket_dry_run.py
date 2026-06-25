@@ -150,15 +150,36 @@ def _count_open_live_positions(session) -> int:
     return session.query(TradeSimulation).filter_by(dry_run=False).count()
 
 
-# Real-money safety: even with combos flagged "live" in ecmwf_live_status.json,
-# WeatherExecutor stays in dry-run mode unless ECMWF_LIVE_TRADING=1 is explicitly
-# set in the environment. This lets the live code path (gates, DB writes, logging)
-# be exercised end-to-end with zero real-order risk before flipping the env var —
-# the forced-dry-run verification step called for before any combo goes live.
-_executor = WeatherExecutor(
-    trade_size_usdc=SIM_SIZE_USD,
-    dry_run=os.environ.get("ECMWF_LIVE_TRADING") != "1",
-)
+# LIVE/DRY is a single global switch: the ECMWF_LIVE_TRADING env var. It is the
+# ONLY authority for whether a real order is placed; ecmwf_live_status.json is the
+# orthogonal per-combo *qualification* allowlist (which combos are eligible at all).
+# A real order is placed iff (combo status == "live") AND (ECMWF_LIVE_TRADING == "1").
+#
+# The executor is built lazily and the env var is re-read each tick (not once at
+# import) so flipping the flag takes effect on the next cycle without a code-level
+# read-once-at-startup trap. Cached per (dry_run) value so a long-lived dry-run loop
+# reuses one instance, but a mode change rebuilds it.
+_executor = None
+_executor_dry_run = None
+
+
+def _live_trading_enabled() -> bool:
+    """Single global LIVE/DRY switch. Real orders require ECMWF_LIVE_TRADING=1."""
+    return os.environ.get("ECMWF_LIVE_TRADING") == "1"
+
+
+def _get_executor() -> WeatherExecutor:
+    """Return a WeatherExecutor whose dry_run mode matches the env var *now*.
+
+    Rebuilds only when the LIVE/DRY switch changes, so flipping ECMWF_LIVE_TRADING
+    takes effect on the next tick rather than requiring a process restart.
+    """
+    global _executor, _executor_dry_run
+    want_dry_run = not _live_trading_enabled()
+    if _executor is None or _executor_dry_run != want_dry_run:
+        _executor = WeatherExecutor(trade_size_usdc=SIM_SIZE_USD, dry_run=want_dry_run)
+        _executor_dry_run = want_dry_run
+    return _executor
 
 
 def _execute_leg(session, executor, location_id: str, mode: str, market_date,
@@ -166,24 +187,28 @@ def _execute_leg(session, executor, location_id: str, mode: str, market_date,
     """
     Decide whether this leg should place a real order, and do so if eligible.
 
-    Returns (is_live, order_id, success, error, fee_paid). For a shadow combo,
-    is_live=False and the rest are None — the caller proceeds to record a plain
-    simulated TradeSimulation row exactly as before. For a live combo, this
+    Returns (eligible, dry_run, order_id, success, error, fee_paid). For a combo
+    not in the live allowlist, eligible=False and the rest are None — the caller
+    records a plain simulated TradeSimulation row. For an eligible combo, this
     enforces the already-held and global-exposure guards before calling
     executor.buy_yes_fok(), mirroring weatherbot-ts strategy.ts's willExecute
     block (lines 606-664, 681-732).
+
+    `dry_run` is taken straight from the executor's OrderResult — the single
+    source of truth for whether real money moved. It is NEVER derived from the
+    allowlist gate, so a simulated fill can never be recorded as a live order.
     """
     if not _is_live(location_id, mode, status):
-        return False, None, None, None, None
+        return False, None, None, None, None, None
 
     if _count_open_legs(session, location_id, mode, market_date) >= MAX_LEGS_PER_CITY_DATE:
-        return True, None, False, "already_holding_max_legs", None
+        return True, True, None, False, "already_holding_max_legs", None
 
     if _count_open_live_positions(session) >= MAX_OPEN_LIVE_POSITIONS:
-        return True, None, False, "max_open_live_positions_reached", None
+        return True, True, None, False, "max_open_live_positions_reached", None
 
     result = executor.buy_yes_fok(token_id, price, size_usdc=size_usdc)
-    return True, result.order_id, result.success, result.error, result.fee_paid
+    return True, result.dry_run, result.order_id, result.success, result.error, result.fee_paid
 
 # Dual-bucket entry price gates (mirror weatherbot-ts src/strategy.ts).
 # Floor applies to the neighbour only — the forecast-centre bucket F is always
@@ -730,14 +755,19 @@ def record_dry_run(forecast: dict, session) -> None:
             print(f"   ⏭️  Leg {leg['idx']}: already placed YES  q={leg['mkt'].get('question','')[:50]}")
             continue
 
-        is_live, order_id, live_success, live_error, fee_paid = _execute_leg(
-            session, _executor, location_id, mode, target_date,
+        eligible, dry_run, order_id, live_success, live_error, fee_paid = _execute_leg(
+            session, _get_executor(), location_id, mode, target_date,
             leg['tok_yes'], leg['yes_ask'], SIM_SIZE_USD, live_status,
         )
-        if is_live and not live_success:
+        if eligible and not live_success:
             print(f"   ❌ Leg {leg['idx']}: LIVE order blocked/failed ({live_error}) — not recorded  "
                   f"q={leg['mkt'].get('question','')[:50]}")
             continue
+
+        # dry_run is the executor's own verdict (None when the combo is not in the
+        # live allowlist → a plain simulated row). It is the single source of truth
+        # for whether real money moved — never derived from the allowlist gate.
+        is_real_order = (dry_run is False)
 
         payout = round(SIM_SIZE_USD / leg['yes_ask'], 2)
         sim = TradeSimulation(
@@ -754,14 +784,14 @@ def record_dry_run(forecast: dict, session) -> None:
             hours_to_peak=round(hours_to_peak, 2),
             simulated_pnl=None,
             order_id=order_id,
-            dry_run=not is_live,
+            dry_run=(dry_run if dry_run is not None else True),
             live_success=live_success,
             live_error=live_error,
             fee_paid=fee_paid,
         )
         session.add(sim)
         tag = 'F' if leg['idx'] == 1 else 'neighbour'
-        mode_tag = 'LIVE' if is_live else 'sim'
+        mode_tag = 'LIVE' if is_real_order else 'sim'
         print(f"   📝 Leg {leg['idx']} ({tag}, {mode_tag}): distance={leg['cand']['distance']:.2f}° ask=${leg['yes_ask']:.3f} "
               f"cost=${SIM_SIZE_USD:.2f} payout=${payout:.2f}  q={leg['mkt'].get('question','')[:50]}")
 

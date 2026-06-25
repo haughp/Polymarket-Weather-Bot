@@ -30,12 +30,14 @@ class _FakeExecutor:
 
 
 class _FakeOrderResult:
-    def __init__(self, success, order_id="ord1", error=None, fee_paid=0.0, price_filled=None):
+    def __init__(self, success, order_id="ord1", error=None, fee_paid=0.0,
+                 price_filled=None, dry_run=False):
         self.success = success
         self.order_id = order_id
         self.error = error
         self.fee_paid = fee_paid
         self.price_filled = price_filled
+        self.dry_run = dry_run
 
 
 @pytest.fixture
@@ -125,26 +127,30 @@ def test_count_open_live_positions_counts_across_all_live_combos(session):
 
 def test_execute_leg_shadow_combo_does_not_call_executor(session):
     executor = _FakeExecutor(_FakeOrderResult(success=True))
-    is_live, order_id, success, error, fee_paid = _execute_leg(
+    eligible, dry_run, order_id, success, error, fee_paid = _execute_leg(
         session, executor, location_id="hong_kong", mode="max",
         market_date=datetime.date(2026, 6, 20), token_id="tok1", price=0.2,
         size_usdc=5.0, status={},
     )
-    assert is_live is False
+    assert eligible is False
+    assert dry_run is None
     assert executor.calls == []
     assert order_id is None
     assert success is None
 
 
 def test_execute_leg_live_combo_calls_executor_and_returns_result(session):
-    executor = _FakeExecutor(_FakeOrderResult(success=True, order_id="0xabc", fee_paid=0.001))
+    # Live combo + executor in LIVE mode (dry_run=False) → a real order row.
+    executor = _FakeExecutor(_FakeOrderResult(success=True, order_id="0xabc",
+                                              fee_paid=0.001, dry_run=False))
     status = {"paris:min": {"status": "live"}}
-    is_live, order_id, success, error, fee_paid = _execute_leg(
+    eligible, dry_run, order_id, success, error, fee_paid = _execute_leg(
         session, executor, location_id="paris", mode="min",
         market_date=datetime.date(2026, 6, 20), token_id="tok1", price=0.2,
         size_usdc=5.0, status=status,
     )
-    assert is_live is True
+    assert eligible is True
+    assert dry_run is False           # executor's own verdict → real money moved
     assert executor.calls == [("tok1", 0.2, 5.0)]
     assert order_id == "0xabc"
     assert success is True
@@ -152,15 +158,34 @@ def test_execute_leg_live_combo_calls_executor_and_returns_result(session):
     assert fee_paid == 0.001
 
 
-def test_execute_leg_live_combo_propagates_failure(session):
-    executor = _FakeExecutor(_FakeOrderResult(success=False, order_id="0xdef", error="fok_order_not_filled"))
+def test_execute_leg_eligible_combo_but_executor_in_dry_mode_is_not_real_order(session):
+    # The bug guard: combo is in the live allowlist, BUT ECMWF_LIVE_TRADING is off,
+    # so the executor simulates (dry_run=True, dry-* order_id, fee=0). The recorded
+    # row MUST be dry_run=True — never stamped live just because the allowlist said so.
+    executor = _FakeExecutor(_FakeOrderResult(success=True, order_id="dry-123",
+                                              fee_paid=0.0, dry_run=True))
     status = {"paris:min": {"status": "live"}}
-    is_live, order_id, success, error, fee_paid = _execute_leg(
+    eligible, dry_run, order_id, success, error, fee_paid = _execute_leg(
         session, executor, location_id="paris", mode="min",
         market_date=datetime.date(2026, 6, 20), token_id="tok1", price=0.2,
         size_usdc=5.0, status=status,
     )
-    assert is_live is True
+    assert eligible is True
+    assert dry_run is True             # simulated despite live allowlist → not real money
+    assert order_id == "dry-123"
+    assert fee_paid == 0.0
+
+
+def test_execute_leg_live_combo_propagates_failure(session):
+    executor = _FakeExecutor(_FakeOrderResult(success=False, order_id="0xdef",
+                                              error="fok_order_not_filled", dry_run=False))
+    status = {"paris:min": {"status": "live"}}
+    eligible, dry_run, order_id, success, error, fee_paid = _execute_leg(
+        session, executor, location_id="paris", mode="min",
+        market_date=datetime.date(2026, 6, 20), token_id="tok1", price=0.2,
+        size_usdc=5.0, status=status,
+    )
+    assert eligible is True
     assert success is False
     assert error == "fok_order_not_filled"
 
@@ -171,7 +196,7 @@ def test_execute_leg_blocks_live_order_when_already_holding_max_legs(session):
     assert MAX_LEGS_PER_CITY_DATE == 2
     executor = _FakeExecutor(_FakeOrderResult(success=True))
     status = {"paris:min": {"status": "live"}}
-    is_live, order_id, success, error, fee_paid = _execute_leg(
+    eligible, dry_run, order_id, success, error, fee_paid = _execute_leg(
         session, executor, location_id="paris", mode="min",
         market_date=datetime.date(2026, 6, 20), token_id="tok3", price=0.2,
         size_usdc=5.0, status=status,
@@ -186,7 +211,7 @@ def test_execute_leg_blocks_live_order_when_global_cap_reached(session):
         _add_leg(session, f"city{i}", "max", datetime.date(2026, 6, 20), market_side="F")
     executor = _FakeExecutor(_FakeOrderResult(success=True))
     status = {"paris:min": {"status": "live"}}
-    is_live, order_id, success, error, fee_paid = _execute_leg(
+    eligible, dry_run, order_id, success, error, fee_paid = _execute_leg(
         session, executor, location_id="paris", mode="min",
         market_date=datetime.date(2026, 6, 20), token_id="tokN", price=0.2,
         size_usdc=5.0, status=status,
