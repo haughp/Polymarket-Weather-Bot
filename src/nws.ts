@@ -289,7 +289,12 @@ export async function fetchOpenMeteoMode(
           const cityHM   = `${get("hour").replace("24", "00")}:${get("minute")}`;
           const cityDate = new Date(`${cityYMD}T${cityHM}Z`);
           const offsetMs = probe.getTime() - cityDate.getTime();
-          const utcDate  = new Date(new Date(localStr).getTime() + offsetMs);
+          // Bug fixed 2026-06-29: this used to re-parse `localStr` via `new Date(localStr)`,
+          // which (with no trailing "Z") JS interprets in the HOST machine's local timezone,
+          // not UTC — silently shifting every peak time by the host's current UTC offset
+          // (e.g. 1h wrong whenever the Dublin host is on IST). `probe` above is already the
+          // correct "treat localStr as UTC" instant; reuse it instead of re-parsing.
+          const utcDate  = new Date(probe.getTime() + offsetMs);
           time[dateStr] = utcDate.toISOString();
         } catch {
           // Fall back to local ISO string if UTC conversion fails — strategy.ts
