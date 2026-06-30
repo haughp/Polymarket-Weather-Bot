@@ -20,6 +20,12 @@ provider_backtest*.txt
 provider_backtest*.err
 provider_backtest_results*.json
 provider_backtest_dallas.json
+
+# Provider matrix — REGENERATED DAILY (09:00 com.sniff.provider-matrix-rebuild).
+# Untracked deliberately (git rm --cached 2026-06-30): while tracked, a branch
+# switch / checkout silently reverted the freshly-rebuilt matrix to an old
+# committed blob, leaving the live bots running on a stale matrix.
+provider_matrix.json
 snapshots*.jsonl
 snapshots_cursor.txt
 scripts/*.png
