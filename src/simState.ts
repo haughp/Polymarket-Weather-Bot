@@ -71,6 +71,14 @@ export interface SignalSnapshot {
   status?:       "live" | "shadow";
   /** True when the city would have entered had it been live (shadow accounting) */
   would_enter?:  boolean;
+  // ── consensus-48 model fields (single-leg; bucket1_* carries the consensus bucket F) ──
+  /** Hours-to-peak at decision time (the ~48h lead). */
+  lead_h?:       number;
+  /** Real executable YES ask fetched at decision time — the promote_combos qualifier
+   *  computes forward EV from THIS, not the mid in bucket1_price. */
+  ask_price?:    number;
+  /** True when the forecast bucket F was ALSO the market's top-priced bucket (agreement). */
+  agree?:        boolean;
 }
 
 const SNAPSHOTS_FILE = path.resolve(__dirname, "..", "snapshots.jsonl");
