@@ -18,19 +18,52 @@ export interface ProviderMatrix {
   cities: Record<string, { max?: ProviderCell; min?: ProviderCell }>;
 }
 
-let _matrix: ProviderMatrix | null | undefined = undefined; // undefined = not yet loaded
+let _matrixPath = path.resolve(__dirname, "..", "provider_matrix.json");
+let _matrix: ProviderMatrix | null = null;
+let _matrixMtimeMs: number | null = null; // mtime of the file backing _matrix, or null if unloaded
 
+/**
+ * Loads the matrix, reloading whenever the file's mtime has changed since the last
+ * load. provider_matrix.json is rebuilt daily (09:00, com.sniff.provider-matrix-rebuild)
+ * by a process separate from this bot; caching it for the life of the process meant a
+ * long-running daemon traded on a stale (up to 24h old) matrix until its next restart.
+ * An mtime check is a cheap stat() per call — cheaper than the network calls this
+ * function's callers gate — so this reloads on every rebuild without a restart.
+ */
 function loadMatrix(): ProviderMatrix | null {
-  if (_matrix !== undefined) return _matrix;
-  const matrixPath = path.resolve(__dirname, "..", "provider_matrix.json");
+  let mtimeMs: number;
   try {
-    const raw = fs.readFileSync(matrixPath, "utf-8");
+    mtimeMs = fs.statSync(_matrixPath).mtimeMs;
+  } catch {
+    _matrix = null;
+    _matrixMtimeMs = null;
+    return null;
+  }
+  if (_matrix !== null && mtimeMs === _matrixMtimeMs) return _matrix;
+  try {
+    const raw = fs.readFileSync(_matrixPath, "utf-8");
     _matrix = JSON.parse(raw) as ProviderMatrix;
+    _matrixMtimeMs = mtimeMs;
     return _matrix;
   } catch {
     _matrix = null;
+    _matrixMtimeMs = null;
     return null;
   }
+}
+
+/** Test-only: point loadMatrix() at a different file and clear cached state. */
+export function __setMatrixPathForTest(p: string): void {
+  _matrixPath = p;
+  _matrix = null;
+  _matrixMtimeMs = null;
+}
+
+/** Test-only: restore the real matrix path and clear cached state. */
+export function __resetMatrixPathForTest(): void {
+  _matrixPath = path.resolve(__dirname, "..", "provider_matrix.json");
+  _matrix = null;
+  _matrixMtimeMs = null;
 }
 
 /**

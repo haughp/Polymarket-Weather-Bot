@@ -51,7 +51,9 @@ function entryWindow(citySlug: string): { openH: number; closeH: number } {
 // missed by a bucket. Cities with NO matrix cell (getMae → null) are now SKIPPED, not traded:
 // an unproven provider is not trusted.
 const MAX_PROVIDER_MAE_F = 1.5;
-const MAX_PROVIDER_MAE_C = 1.0;
+// 0.85°C (tightened from 1.0 on 2026-06-30): a 1.0 cap == a full 1°C bucket, too loose.
+// Note: TS bot is US-only (°F), so this °C ceiling only bites if a °C city is ever added.
+const MAX_PROVIDER_MAE_C = 0.85;
 
 export type TradeMode = "dry-run" | "paper" | "execute";
 

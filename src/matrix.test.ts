@@ -6,7 +6,7 @@
 
 import assert from "assert";
 import * as nws from "./nws";
-import { getProvider, getBias, getMae, getUnit } from "./matrix";
+import { getProvider, getBias, getMae, getUnit, __setMatrixPathForTest, __resetMatrixPathForTest } from "./matrix";
 
 // The matrix loaded by matrix.ts comes from ../provider_matrix.json (real file). These
 // tests assert behavior against whatever cells that file currently holds, plus the
@@ -35,7 +35,7 @@ function test(name: string, fn: () => void | Promise<void>) {
 // Replicate the strategy.ts gate so we test the actual decision, not a paraphrase.
 // Unit-specific thresholds; a city with NO matrix MAE is treated as unproven → SKIP.
 const MAX_PROVIDER_MAE_F = 1.5;
-const MAX_PROVIDER_MAE_C = 1.0;
+const MAX_PROVIDER_MAE_C = 0.85;
 function gateSkips(city: string, mode: "highest" | "lowest"): boolean {
   const mae = getMae(city, mode);
   if (mae == null) return true; // unproven → skip
@@ -111,6 +111,37 @@ async function main() {
     }
     // Informational — not all matrices will have an over-threshold cell.
     if (!anyOverThreshold) console.log("       (note: no matrix cell currently exceeds the gate)");
+  });
+
+  // ── cache invalidation: the daily 09:00 rebuild must be picked up WITHOUT a
+  // daemon restart. Regression for the process-lifetime cache that made the
+  // bot run a stale matrix for up to 24h after every rebuild.
+  await test("loadMatrix reloads when the file's mtime changes (no restart needed after a rebuild)", () => {
+    const tmp = path.resolve(__dirname, "..", "matrix.mtime-test.tmp.json");
+    try {
+      fs.writeFileSync(tmp, JSON.stringify({
+        generated_at: "t1", window_days: 30, lead_days: 1,
+        cities: { testcity: { max: { provider: "provA", bias: 0, mae: 1, mae_debiased: 1, samples: 30, unit: "F" } } },
+      }));
+      __setMatrixPathForTest(tmp);
+      assert.strictEqual(getProvider("testcity", "max"), "provA");
+
+      // Simulate the 09:00 rebuild: new content, distinct (later) mtime.
+      fs.writeFileSync(tmp, JSON.stringify({
+        generated_at: "t2", window_days: 30, lead_days: 1,
+        cities: { testcity: { max: { provider: "provB", bias: 0, mae: 1, mae_debiased: 1, samples: 30, unit: "F" } } },
+      }));
+      const future = new Date(Date.now() + 5000);
+      fs.utimesSync(tmp, future, future);
+
+      assert.strictEqual(
+        getProvider("testcity", "max"), "provB",
+        "expected the rebuilt matrix to be picked up without a process restart"
+      );
+    } finally {
+      __resetMatrixPathForTest();
+      fs.rmSync(tmp, { force: true });
+    }
   });
 
   await test("getBias unchanged: returns the matrix cell bias for a covered city", () => {

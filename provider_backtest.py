@@ -255,14 +255,16 @@ MATRIX_PATH = os.path.join(os.path.dirname(__file__), "provider_matrix.json")
 # takes the slot — falling through to "no cell" only when NONE clear it (the runtime gate
 # then skips the city). Added 2026-06-16 after NYC + Dallas June-15 losses where the
 # matrix-chosen provider's mae_debiased of 1.6–1.9°F still traded and missed by a bucket.
-#   US (°F): 1.5°F.  Non-US (°C): 1.0°C.
+#   US (°F): 1.5°F.  Non-US (°C): 0.85°C (tightened from 1.0 on 2026-06-30 — a
+#   1.0°C cap equals a FULL 1°C bucket, so a provider missing by ~a whole bucket
+#   still passed; 0.85 leaves headroom below the bucket width).
 # A separate |bias| <= 4°F/2°C cap previously ran alongside this one. Dropped 2026-06-19:
 # debiasing already subtracts the bias before this cap is checked, so a high-bias/low-MAE
 # provider (e.g. Miami AIFS: MAE 0.85, bias +4.97) is already corrected to a trustworthy
 # debiased error — penalizing it twice for the same number was redundant gating, not an
 # independent risk check.
 MAX_MAE_F = 1.5
-MAX_MAE_C = 1.0
+MAX_MAE_C = 0.85
 
 
 def max_mae_for(unit: str) -> float:
