@@ -50,6 +50,8 @@ scripts/debug.md
 simulation.json
 # Per-city shadow→live promotion state — regenerated nightly by promote_cities.py
 city_status.json
+# Per-(city|mode) consensus-48 promotion state — seeded then rewritten by promote_combos.py
+strategy_status.json
 
 # Logs
 *.log

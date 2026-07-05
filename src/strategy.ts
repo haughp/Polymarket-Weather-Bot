@@ -546,10 +546,11 @@ export async function run(options: RunOptions): Promise<void> {
         if (ask != null) snapData.ask_price = ask;
         snapData.would_enter = ask != null && ask <= CONSENSUS_MAX_PRICE;
 
-        // Single leg: don't re-enter a combo/date already held.
-        const alreadyHeld = Object.values(positions).some(p => p.location === citySlug && p.date === dateStr);
-        if (alreadyHeld) {
-          skip(`Already hold ${citySlug} ${dateStr} — no re-entry`);
+        // Single leg: don't re-buy THIS bucket. Keyed per-market (F.market.id), NOT per
+        // (city,date) — miami runs both modes as SEPARATE markets, so a city/date guard would
+        // let one mode silently block the other (opus review Important #1).
+        if (positions[F.market.id]) {
+          skip(`Already hold ${_fmtRange(F.range)} for ${citySlug} ${dateStr} — no re-entry`);
           await appendSnapshot(snapData);
           continue;
         }
