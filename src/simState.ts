@@ -40,6 +40,10 @@ export interface Trade {
   location?: string;
   date?: string;
   forecast_temp?: number;
+  /** Git revision of the running build that executed this trade (e.g. "d7079dd"
+   *  or "d7079dd+dirty"). Captured once at process start; stamped on every
+   *  entry/exit so the dashboard can attribute each trade to its source code. */
+  code_rev?: string;
 }
 
 export interface SimulationState {

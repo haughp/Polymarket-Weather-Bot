@@ -19,6 +19,26 @@ import { isLive, loadCityStatus } from "./cityStatus";
 import { isComboLive, loadStrategyStatus } from "./strategyStatus";
 import { tomorrowInTz, targetDatesForLead } from "./time";
 import type { ClobClient } from "@polymarket/clob-client-v2";
+import path from "path";
+import { execSync, type ExecSyncOptions } from "child_process";
+
+// Git provenance of the running build, captured ONCE at module load and stamped
+// onto every trade record (see Trade.code_rev). dist/ is gitignored + compiled, so
+// this is the commit the repo was AT when the bot launched — not a byte-for-byte
+// proof that dist matches HEAD. The "+dirty" suffix flags uncommitted tracked-source
+// drift, the recurring failure mode where an edit never got committed/rebuilt.
+// Best-effort: falls back to "unknown" if git is unavailable.
+const CODE_REV: string = (() => {
+  try {
+    const repo = path.resolve(__dirname, "..");
+    const opts: ExecSyncOptions = { cwd: repo, stdio: ["ignore", "pipe", "ignore"] };
+    const head = execSync("git rev-parse --short HEAD", opts).toString().trim();
+    const dirty = execSync("git status --porcelain --untracked-files=no", opts).toString().trim().length > 0;
+    return dirty ? `${head}+dirty` : head;
+  } catch {
+    return "unknown";
+  }
+})();
 
 const FIXED_POSITION_SIZE = 1.05;
 
@@ -293,6 +313,7 @@ export async function run(options: RunOptions): Promise<void> {
         else sim.losses += 1;
         const trade: Trade = {
           type: "exit",
+          code_rev: CODE_REV,
           question: pos.question,
           entry_price: pos.entry_price,
           exit_price: exitPrice,
@@ -312,6 +333,7 @@ export async function run(options: RunOptions): Promise<void> {
         else sim.losses += 1;
         const trade: Trade = {
           type: "exit",
+          code_rev: CODE_REV,
           question: pos.question,
           entry_price: pos.entry_price,
           exit_price: exitPrice,
@@ -363,6 +385,7 @@ export async function run(options: RunOptions): Promise<void> {
         sim.losses += 1;
         const trade: Trade = {
           type: "exit",
+          code_rev: CODE_REV,
           question: pos.question,
           entry_price: pos.entry_price,
           exit_price: currentPrice,
@@ -380,6 +403,7 @@ export async function run(options: RunOptions): Promise<void> {
         sim.losses += 1;
         const trade: Trade = {
           type: "exit",
+          code_rev: CODE_REV,
           question: pos.question,
           entry_price: pos.entry_price,
           exit_price: currentPrice,
@@ -602,7 +626,7 @@ export async function run(options: RunOptions): Promise<void> {
           };
           positions[F.market.id] = pos;
           sim.total_trades += 1;
-          sim.trades.push({ type: "entry", question: F.question, entry_price: ask, shares: actualShares, cost: positionSize, opened_at: pos.opened_at });
+          sim.trades.push({ type: "entry", code_rev: CODE_REV, question: F.question, entry_price: ask, shares: actualShares, cost: positionSize, opened_at: pos.opened_at });
           tradesExecuted += 1;
           balance -= positionSize;
           snapData.entered = true;
@@ -615,7 +639,7 @@ export async function run(options: RunOptions): Promise<void> {
           };
           positions[F.market.id] = pos;
           sim.total_trades += 1;
-          sim.trades.push({ type: "entry", question: F.question, entry_price: px, shares: positionSize / px, cost: positionSize, opened_at: pos.opened_at });
+          sim.trades.push({ type: "entry", code_rev: CODE_REV, question: F.question, entry_price: px, shares: positionSize / px, cost: positionSize, opened_at: pos.opened_at });
           tradesExecuted += 1;
           snapData.entered = true;
           ok(`Paper position opened — $${positionSize.toFixed(2)}`);
