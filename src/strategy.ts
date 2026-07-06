@@ -426,18 +426,28 @@ export async function run(options: RunOptions): Promise<void> {
         let dateStr = "", month = "", day = 0, year = 0;
         let hoursToPeak = NaN;
         let peakDt: Date | null = null;
+        let nearestLead = NaN; // candidate peak closest to the 48h window centre, for visibility
         for (const cand of targetDatesForLead(locData.tz, 3)) {
           const ft = forecasts[marketMode === "highest" ? "max" : "min"][cand.dateStr];
           const pk = forecasts[marketMode === "highest" ? "maxTime" : "minTime"][cand.dateStr];
           if (ft == null || !pk) continue;
           const pd = new Date(pk);
           const h = (pd.getTime() - Date.now()) / (1000 * 3600);
+          if (Number.isNaN(nearestLead) || Math.abs(h - 48) < Math.abs(nearestLead - 48)) nearestLead = h;
           if (h >= CONSENSUS_ENTRY_CLOSE_H && h <= CONSENSUS_ENTRY_OPEN_H) {
             dateStr = cand.dateStr; month = cand.month; day = cand.day; year = cand.year;
             hoursToPeak = h; peakDt = pd; break;
           }
         }
-        if (!peakDt) continue; // no candidate date in the 48h window right now (normal between-window state)
+        if (!peakDt) {
+          // Out of the [46,50]h window right now (normal between-window state). Log for LIVE
+          // combos only, so their approach to the window is visible without spamming all cities.
+          if (isComboLive(citySlug, marketMode, strategyStatus)) {
+            const lead = Number.isNaN(nearestLead) ? "no forecast" : `${nearestLead.toFixed(1)}h`;
+            skip(`${citySlug}|${marketMode} LIVE — out of window (nearest peak ${lead}, window ${CONSENSUS_ENTRY_CLOSE_H}–${CONSENSUS_ENTRY_OPEN_H}h)`);
+          }
+          continue;
+        }
 
         const forecastTemp = forecasts[marketMode === "highest" ? "max" : "min"][dateStr]!;
         const biasOffset = getBias(citySlug, marketMode); // matrix → FORECAST_BIAS fallback → 0
