@@ -78,12 +78,16 @@ const MAX_PROVIDER_MAE_F = 1.5;
 const MAX_PROVIDER_MAE_C = 0.85;
 
 // ── Consensus-48 model (replaces the dual-bucket strategy) ──────────────────
-// Enter ~48h before forecast peak; buy the single consensus bucket (forecast bucket F
+// Enter 30–46h before forecast peak; buy the single consensus bucket (forecast bucket F
 // only when F is the market's top-priced bucket). Price cap replaces the old $0.35
 // ceiling (this model buys the favourite): above ~$0.60 the q/p−1 edge is ≤0 for q≈0.45.
+// Window was [46,50] but Polymarket lists daily highest-temp markets at ~01:00 UTC —
+// only ~43.5h before peak — so the window had already closed before the market existed
+// and highest-mode combos could never enter. Open at 46h to catch the listing; close
+// at 30h to avoid very-late entries.
 const CONSENSUS_MAX_PRICE = 0.60;
-const CONSENSUS_ENTRY_OPEN_H = 50;   // window opens 50h before peak
-const CONSENSUS_ENTRY_CLOSE_H = 46;  // window closes 46h before peak (centred on 48)
+const CONSENSUS_ENTRY_OPEN_H = 46;   // window opens 46h before peak (markets list ~43.5h out)
+const CONSENSUS_ENTRY_CLOSE_H = 30;  // window closes 30h before peak
 
 export type TradeMode = "dry-run" | "paper" | "execute";
 
@@ -446,7 +450,7 @@ export async function run(options: RunOptions): Promise<void> {
     {
       for (const marketMode of ["highest", "lowest"] as const) {
         // Consensus-48: pick the candidate observation date whose forecast peak lands
-        // in the [46,50]h entry window (usually day-after-tomorrow, ~2 days out).
+        // in the [30,46]h entry window (usually day-after-tomorrow, ~2 days out).
         let dateStr = "", month = "", day = 0, year = 0;
         let hoursToPeak = NaN;
         let peakDt: Date | null = null;
@@ -464,7 +468,7 @@ export async function run(options: RunOptions): Promise<void> {
           }
         }
         if (!peakDt) {
-          // Out of the [46,50]h window right now (normal between-window state). Log for LIVE
+          // Out of the [30,46]h window right now (normal between-window state). Log for LIVE
           // combos only, so their approach to the window is visible without spamming all cities.
           if (isComboLive(citySlug, marketMode, strategyStatus)) {
             const lead = Number.isNaN(nearestLead) ? "no forecast" : `${nearestLead.toFixed(1)}h`;
@@ -500,7 +504,10 @@ export async function run(options: RunOptions): Promise<void> {
           year,
           marketMode
         );
-        if (!event) continue;
+        if (!event) {
+          skip(`${citySlug}|${marketMode} market not listed yet (${hoursToPeak.toFixed(1)}h to peak) — skipping`);
+          continue;
+        }
 
         const localPeakStr = new Intl.DateTimeFormat('en-US', {
           hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: locData.tz,
