@@ -290,3 +290,13 @@ def test_download_fetches_param_ranges_and_resumes(tmp_path):
     assert session.ranges == [10, 20]  # member 1 kept, 2 and 3 fetched
     assert path.read_bytes() == b"".join(msgs)
     assert not part.exists()
+
+
+def test_align_handles_mixed_time_resolutions():
+    stats = ensemble_stats(
+        pd.DataFrame([[10.0, 12.0]], index=utc_range("2026-09-01T00:00", 1).as_unit("ns"))
+    )
+    obs = pd.Series(
+        [11.0], index=pd.DatetimeIndex(["2026-09-01T00:10"], tz="UTC").as_unit("us"), name="obs"
+    )
+    assert align_forecast_observations(stats, obs)["obs"].iloc[0] == 11.0

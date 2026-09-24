@@ -46,8 +46,10 @@ def align_forecast_observations(
     if isinstance(stats.index, pd.DatetimeIndex) and stats.index.tz is not None:
         left = stats.rename_axis("valid_time").reset_index()
         right = pd.DataFrame({"obs_time": obs.index, "obs": obs.to_numpy()})
-        right["obs_time"] = right["obs_time"].dt.tz_convert("UTC")
-        left["valid_time"] = left["valid_time"].dt.tz_convert("UTC")
+        # merge_asof needs identical dtypes, including time resolution
+        # (GRIB decodes to ns, CSV parsing may give us).
+        right["obs_time"] = right["obs_time"].dt.tz_convert("UTC").astype("datetime64[ns, UTC]")
+        left["valid_time"] = left["valid_time"].dt.tz_convert("UTC").astype("datetime64[ns, UTC]")
         merged = pd.merge_asof(
             left,
             right,
