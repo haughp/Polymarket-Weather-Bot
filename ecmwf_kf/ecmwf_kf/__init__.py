@@ -1,5 +1,7 @@
-"""ECMWF ensemble ingestion and observation alignment (Phase 1 of the
-ensemble Kalman-filter bias-correction pipeline).
+"""ECMWF ensemble Kalman-filter bias correction.
+
+Phase 1 (ingestion/alignment) lives in ingest, observations, ensemble and
+align; phases 2-4 (filter, verification, plot) in kalman.
 
 Every loader returns a *member frame*: a DataFrame indexed by UTC valid time
 with one column per ensemble member, values in degrees Celsius.
@@ -14,9 +16,11 @@ from .ingest import (
     load_open_meteo_ensemble,
     parse_open_meteo_ensemble,
 )
+from .kalman import KalmanConfig, plot_kalman, run_kalman_filter, verification_summary
 from .observations import fetch_nws_observations, load_observations_csv
 
 __all__ = [
+    "KalmanConfig",
     "align_forecast_observations",
     "daily_aggregate",
     "download_ecmwf_open_data",
@@ -27,4 +31,7 @@ __all__ = [
     "load_observations_csv",
     "load_open_meteo_ensemble",
     "parse_open_meteo_ensemble",
+    "plot_kalman",
+    "run_kalman_filter",
+    "verification_summary",
 ]

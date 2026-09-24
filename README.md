@@ -190,7 +190,7 @@ Forecast and related endpoints are accessed from `src/nws.ts` and supporting mod
 
 ### ECMWF ensemble (Python, `ecmwf_kf/`)
 
-A separate Python pipeline ingests the ECMWF ensemble (Open-Meteo, GRIB2/NetCDF, or ECMWF open data), computes the ensemble mean and spread, and aligns them with station observations. Its output is the training table for the Kalman-filter bias correction. See [`ecmwf_kf/README.md`](ecmwf_kf/README.md).
+A separate Python pipeline ingests the ECMWF ensemble (Open-Meteo, GRIB2/NetCDF, or ECMWF open data), computes the ensemble mean and spread, and aligns them with station observations. An online Kalman filter then corrects the forecast bias and scale and reports MAE/RMSE against the raw forecast. See [`ecmwf_kf/README.md`](ecmwf_kf/README.md).
 
 ## Monitoring and logging
 

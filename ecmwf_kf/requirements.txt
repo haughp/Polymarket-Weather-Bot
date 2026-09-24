@@ -7,5 +7,7 @@ cfgrib>=0.9.14
 eccodes>=2.37
 # NetCDF decoding (only needed for NetCDF inputs)
 netCDF4>=1.6
+# Kalman-filter diagnostic plot
+matplotlib>=3.8
 # tests
 pytest>=8
