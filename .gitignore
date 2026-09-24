@@ -31,3 +31,11 @@ yarn-error.log*
 # OS
 .DS_Store
 Thumbs.db
+
+# Python (ecmwf_kf)
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.cache/
+aligned.csv

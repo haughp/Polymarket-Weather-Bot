@@ -1,0 +1,11 @@
+numpy>=1.26
+pandas>=2.1
+xarray>=2024.1
+requests>=2.31
+# GRIB2 decoding (only needed for --source grib / ecmwf-aws)
+cfgrib>=0.9.14
+eccodes>=2.37
+# NetCDF decoding (only needed for NetCDF inputs)
+netCDF4>=1.6
+# tests
+pytest>=8
