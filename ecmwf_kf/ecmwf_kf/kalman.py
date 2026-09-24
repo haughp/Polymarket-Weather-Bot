@@ -32,9 +32,9 @@ class KalmanConfig:
 
 
 def estimate_sigma0_sq(y: np.ndarray, ens_mean: np.ndarray, window: int = 30) -> float:
-    """sigma0^2 = var(y_{1:window} - ens_mean_{1:window}), ignoring missing y."""
-    err = (y - ens_mean)[:window]
-    err = err[~np.isnan(err)]
+    """sigma0^2 = var(y - ens_mean) over the first ``window`` observed rows."""
+    err = y - ens_mean
+    err = err[~np.isnan(err)][:window]
     if err.size < 2:
         raise ValueError("Need at least 2 observations in the first window to estimate sigma0^2")
     return float(np.var(err, ddof=1))

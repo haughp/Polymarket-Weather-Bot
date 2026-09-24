@@ -204,39 +204,84 @@ def _pick_variable(ds: xr.Dataset, param: str | None) -> xr.DataArray | None:
     return gridded[0]
 
 
+def _utc(values) -> pd.Series:
+    t = pd.to_datetime(pd.Series(values))
+    return t.dt.tz_localize("UTC") if t.dt.tz is None else t.dt.tz_convert("UTC")
+
+
 def point_to_long_frame(da: xr.DataArray) -> pd.DataFrame:
-    """Flatten a point DataArray to rows of (valid_time, number, value)."""
+    """Flatten a point DataArray to rows of (init_time, valid_time, number, value).
+
+    ``init_time`` is the forecast run (NaT when the file does not say); it
+    keeps forecasts from different runs apart when their valid times overlap.
+    """
     if "number" not in da.dims:
         number = int(da["number"].values) if "number" in da.coords else 0
         da = da.drop_vars("number", errors="ignore").expand_dims(number=[number])
 
+    extra = [d for d in da.dims if d not in ("number", "step", "time", "valid_time")]
+    if extra:
+        raise ValueError(f"Unexpected extra dimensions {extra}; select a single level first")
+
     df = da.to_dataframe(name="value").reset_index()
+    if "step" in df.columns and "time" in df.columns:
+        init = df["time"]  # GRIB convention: time = run, step = lead
+    elif "forecast_reference_time" in df.columns:
+        init = df["forecast_reference_time"]
+    else:
+        init = pd.Series(pd.NaT, index=df.index)
+
     if "valid_time" not in df.columns:
         if "time" not in df.columns:
             raise ValueError("Cannot find a time coordinate (valid_time/time)")
         step = pd.to_timedelta(df["step"]) if "step" in df.columns else pd.Timedelta(0)
         df["valid_time"] = pd.to_datetime(df["time"]) + step
 
-    extra = [d for d in da.dims if d not in ("number", "step", "time", "valid_time")]
-    if extra:
-        raise ValueError(f"Unexpected extra dimensions {extra}; select a single level first")
-
-    valid = pd.to_datetime(df["valid_time"])
-    df["valid_time"] = valid.dt.tz_localize("UTC") if valid.dt.tz is None else valid.dt.tz_convert("UTC")
+    df["valid_time"] = _utc(df["valid_time"]).to_numpy()
+    df["init_time"] = _utc(init).to_numpy()
 
     units = da.attrs.get("units", da.attrs.get("GRIB_units", ""))
     if units in ("K", "kelvin", "Kelvin"):
         df["value"] = df["value"] - 273.15
-    return df[["valid_time", "number", "value"]]
+    return df[["init_time", "valid_time", "number", "value"]]
 
 
 def long_to_member_frame(long: pd.DataFrame) -> pd.DataFrame:
+    """Pivot to a member frame. Where runs overlap, the latest run wins."""
+    if "init_time" in long.columns and long["init_time"].notna().any():
+        latest = long.groupby("valid_time")["init_time"].transform("max")
+        long = long[(long["init_time"] == latest) | latest.isna()]
     frame = long.pivot_table(
         index="valid_time", columns="number", values="value", aggfunc="first"
     ).sort_index()
     frame.columns = frame.columns.astype(int)
     frame.columns.name = "number"
     return frame
+
+
+def load_gridded_points(
+    paths: Iterable[str | Path],
+    points: dict[str, tuple[float, float]],
+    param: str | None = "2t",
+    method: str = "bilinear",
+) -> pd.DataFrame:
+    """Open each file once and extract several points.
+
+    Returns long rows (point, init_time, valid_time, number, value).
+    """
+    parts = []
+    for path in map(Path, paths):
+        for ds in _open_datasets(path):
+            da = _pick_variable(ds, param)
+            if da is None:
+                continue
+            for name, (lat, lon) in points.items():
+                long = point_to_long_frame(extract_point(da, lat, lon, method))
+                long.insert(0, "point", name)
+                parts.append(long)
+    if not parts:
+        return pd.DataFrame(columns=["point", "init_time", "valid_time", "number", "value"])
+    return pd.concat(parts, ignore_index=True)
 
 
 def load_gridded_members(
@@ -247,16 +292,10 @@ def load_gridded_members(
     method: str = "bilinear",
 ) -> pd.DataFrame:
     """Load GRIB2/NetCDF ensemble files and interpolate them to one point."""
-    parts = []
-    for path in map(Path, paths):
-        for ds in _open_datasets(path):
-            da = _pick_variable(ds, param)
-            if da is None:
-                continue
-            parts.append(point_to_long_frame(extract_point(da, lat, lon, method)))
-    if not parts:
+    long = load_gridded_points(paths, {"p": (lat, lon)}, param=param, method=method)
+    if long.empty:
         raise ValueError(f"No '{param}' fields found in the given files")
-    return long_to_member_frame(pd.concat(parts, ignore_index=True))
+    return long_to_member_frame(long.drop(columns="point"))
 
 
 # ---------------------------------------------------------------------------

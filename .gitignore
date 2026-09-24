@@ -39,3 +39,5 @@ __pycache__/
 .pytest_cache/
 .cache/
 aligned.csv
+
+desktop_output/

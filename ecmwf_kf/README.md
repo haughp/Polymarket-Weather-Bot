@@ -113,6 +113,69 @@ excluded. `--plot kalman.png` saves a figure with the actuals, the raw
 forecast and the corrected forecast (with a ±1σ band) above the α and β
 trajectories.
 
+## Desktop workflow: your own ECMWF files
+
+`python -m ecmwf_kf.desktop` runs everything on a folder of ensemble files
+on your computer. It is the command to use day to day.
+
+```powershell
+# Windows (PowerShell). The first run creates .venv and installs dependencies.
+cd Polymarket-Weather-Bot\ecmwf_kf
+.\run_desktop.ps1 -DataDir "C:\Users\me\Desktop\ECMWF"
+```
+```bash
+# macOS / Linux
+./run_desktop.sh ~/Desktop/ECMWF
+```
+
+**What it does on each run:**
+1. **Finds files.** Scans the folder, including subfolders, for `*.grib`,
+   `*.grib2`, `*.grb`, `*.grb2` and `*.nc`: ECMWF open data, MARS or
+   Copernicus downloads, one file per run or several runs per file.
+2. **Extracts every city in one pass per file.** Results are cached in
+   `desktop_output/.cache`, so unchanged files are never decoded twice and
+   daily runs only read the new files.
+3. **Builds daily highs at a fixed lead time** in each city's local time.
+   `--lead-days 1` (the default) means the forecast issued the day before;
+   `0` means the same-day forecast. When several runs have the same lead
+   (for example 00z and 12z), the latest run wins. Days with fewer than
+   `--min-samples` forecast values per member are dropped, as are
+   observation days with fewer than `--obs-min-samples` reports. Today is
+   never used as an observation, because its high isn't final yet.
+4. **Collects observations** into `desktop_output/obs/<city>.csv`, which
+   grows with every run:
+   - `--obs-source iem` (default): the Iowa Environmental Mesonet METAR
+     archive, which can backfill months of history in one request.
+   - `nws`: api.weather.gov, which only keeps about the last 7 days.
+   - `csv`: your own `<city>.csv` files (`time,value`), with
+     `--obs-units F|C|K`.
+5. **Runs the Kalman filter** over the whole history, then writes the
+   outputs.
+
+| output | contents |
+|---|---|
+| `forecasts.json` | upcoming dates per city: raw and corrected high in °C and °F, forecast σ, run time, member count |
+| `verification.csv` | raw vs corrected MAE/RMSE per city (first `--skip` rows excluded) |
+| `<city>_kalman.csv`, `<city>_kalman.png` | full filter table and plot |
+
+Until a city has at least 2 observed days, its forecast is passed through
+uncorrected (`"kalman_applied": false`). The filter needs about 30 days
+before its scores mean much.
+
+**Options you'll likely use:** `--cities nyc,chicago`, `--param mx2t6` (see
+below), `--lead-days 0`, `--w-alpha 1e-3`, `--no-plot`. Run
+`python -m ecmwf_kf.desktop --help` for the full list.
+
+**Scheduling it daily (Windows Task Scheduler):**
+- **Program:** `powershell.exe`
+- **Arguments:** `-ExecutionPolicy Bypass -File "C:\path\to\Polymarket-Weather-Bot\ecmwf_kf\run_desktop.ps1" -DataDir "C:\Users\me\Desktop\ECMWF"`
+- **Time:** after your ECMWF files arrive.
+
+**Installing on Windows:** `eccodes` (the GRIB decoder) is installed from
+pip. If `import cfgrib` fails, use conda instead:
+`conda install -c conda-forge cfgrib eccodes`, then run
+`python -m ecmwf_kf.desktop ...` from that environment.
+
 ## Usage
 
 ```bash
