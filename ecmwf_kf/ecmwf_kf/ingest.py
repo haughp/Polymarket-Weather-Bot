@@ -14,6 +14,7 @@ Sources:
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 import warnings
@@ -342,8 +343,15 @@ def download_ecmwf_open_data(
         if len(records) != EXPECTED_MEMBERS:
             warnings.warn(f"step {step}h: {len(records)} members for '{param}' (expected {EXPECTED_MEMBERS})")
 
+        # Resume an interrupted step: keep the members already written in full.
         tmp = target.with_suffix(".part")
-        with open(tmp, "wb") as out:
+        kept = 0
+        if tmp.exists():
+            have = tmp.stat().st_size
+            while records and kept + int(records[0]["_length"]) <= have:
+                kept += int(records.pop(0)["_length"])
+            os.truncate(tmp, kept)
+        with open(tmp, "ab") as out:
             for rec in records:
                 start = int(rec["_offset"])
                 end = start + int(rec["_length"]) - 1

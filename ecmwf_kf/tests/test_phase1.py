@@ -242,3 +242,51 @@ def test_align_daily_exact_join():
 def test_parse_steps():
     assert parse_steps("0-9/3") == [0, 3, 6, 9]
     assert parse_steps("0,6,144-150/6") == [0, 6, 144, 150]
+
+
+# --- open-data download ---------------------------------------------------------
+
+
+class FakeResponse:
+    def __init__(self, content, status=200):
+        self.content, self.status_code = content, status
+
+    def raise_for_status(self):
+        pass
+
+
+class FakeSession:
+    """Serves an index + GRIB blob; records which byte ranges were requested."""
+
+    def __init__(self, blob, index):
+        self.blob, self.index, self.ranges = blob, index, []
+
+    def get(self, url, headers=None, timeout=None):
+        if url.endswith(".index"):
+            return FakeResponse(self.index.encode())
+        start, end = map(int, headers["Range"].split("=")[1].split("-"))
+        self.ranges.append(start)
+        return FakeResponse(self.blob[start : end + 1])
+
+
+def test_download_fetches_param_ranges_and_resumes(tmp_path):
+    from ecmwf_kf.ingest import download_ecmwf_open_data
+
+    msgs = [b"GRIB" + bytes([i]) * 6 for i in range(3)]  # 10 bytes each
+    blob = b"".join(msgs) + b"GRIBother!"
+    index = "\n".join(
+        json.dumps({"type": "pf", "number": str(i + 1), "param": "2t", "_offset": 10 * i, "_length": 10})
+        for i in range(3)
+    ) + "\n" + json.dumps({"type": "pf", "number": "1", "param": "10u", "_offset": 30, "_length": 10})
+
+    run = pd.Timestamp("2026-09-23 00:00")
+    part = tmp_path / "2026092300-24h-enfo-2t.part"
+    part.write_bytes(msgs[0] + msgs[1][:4])  # interrupted mid-member 2
+
+    session = FakeSession(blob, index)
+    with pytest.warns(UserWarning, match="3 members"):
+        (path,) = download_ecmwf_open_data(run, [24], cache_dir=tmp_path, session=session,
+                                           request_interval=0)
+    assert session.ranges == [10, 20]  # member 1 kept, 2 and 3 fetched
+    assert path.read_bytes() == b"".join(msgs)
+    assert not part.exists()
